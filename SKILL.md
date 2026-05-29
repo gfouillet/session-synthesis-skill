@@ -197,8 +197,9 @@ mark it as unavailable rather than guessing. This covers local or custom models.
 
 Ask the user (use ask_user tool when available):
 
-1. **Outcome**: Done / Partial / Failed
-2. **Self-rating**: 1-5 (quality of the session / was it efficient?)
+1. **Outcome**: ✅ Done / ⚠️ Partial / ❌ Failed
+2. **Self-rating**: 1–5 (quality of the session / was it efficient?)
+   - 5 → 🏆  |  4 → 🟢  |  3 → 🟡  |  2 → 🟠  |  1 → 🔴
 3. **Notes**: Any lessons learned, things to do differently, or follow-up actions
 4. **Output path**: Where to save (default: `~/copilot-sessions/`)
 5. **Model(s)** — ALWAYS ask, even if resolved in Step 3b. Pre-fill with the model

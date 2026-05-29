@@ -13,7 +13,7 @@
 {{OUTCOME_EMOJI}} {{OUTCOME_LABEL}}
 
 ## Self-Rating
-{{RATING}}/5 — {{RATING_NOTE}}
+{{RATING_EMOJI}} {{RATING}}/5 — {{RATING_NOTE}}
 
 ## Token Usage
 - **Model(s)**: {{MODELS}}
