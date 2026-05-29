@@ -84,18 +84,18 @@ def _copilot_cli_is_active() -> bool:
 
 ORCHESTRATORS = [
     {
-        "name": "opencode",
-        "description": "OpenCode AI assistant",
-        "detect": _opencode_detected,
-        "script": None,  # No backend yet — uses fallback
-        "db": None,
-    },
-    {
         "name": "copilot-cli",
         "description": "GitHub Copilot CLI",
         "detect": _copilot_cli_is_active,
         "script": SKILL_ROOT / "scripts" / "estimate_tokens_copilot_cli.py",
         "db": SESSION_STORE_DB,
+    },
+    {
+        "name": "opencode",
+        "description": "OpenCode AI assistant",
+        "detect": _opencode_detected,
+        "script": None,  # No backend yet — uses fallback
+        "db": None,
     },
     # ── Add future orchestrators here ──
     # {
@@ -324,9 +324,9 @@ def print_fallback_report(report: dict) -> None:
     b = report["breakdown"]
     print()
     print(f"{'─' * 60}")
-    print(f"  Session: {s['summary'] or s['id']}")
-    print(f"  Repo:    {s['repository'] or '—'}  |  Turns: {s['turn_count']}")
-    print(f"  Date:    {s['created_at'][:19]}")
+    print(f"  Session: {s['summary'] or s['id'] or '—'}")
+    print(f"  Repo:    {s['repository'] or '—'}  |  Turns: {s['turn_count'] or '—'}")
+    print(f"  Date:    {(s['created_at'] or '—')[:19]}")
     print(f"  Model:   {report['model'] or 'unknown'}")
     print(f"  Orchestrator: {report['orchestrator']}")
     print(f"{'─' * 60}")
@@ -367,13 +367,14 @@ def main():
     if args.orchestrator:
         orch = next((o for o in ORCHESTRATORS if o["name"] == args.orchestrator), None)
 
-    db_path = orch["db"] if orch and orch.get("db") else SESSION_STORE_DB
+    db_path = orch["db"] if orch and orch.get("db") else (SESSION_STORE_DB if orch is None else None)
 
     if args.list:
         if db_path and db_path.exists():
             list_sessions(db_path)
         else:
-            print("No session database available for listing.", file=sys.stderr)
+            orch_name = orch["name"] if orch else "unknown"
+            print(f"No session database available for orchestrator '{orch_name}'.", file=sys.stderr)
             sys.exit(1)
         return
 
