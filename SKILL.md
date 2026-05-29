@@ -99,17 +99,39 @@ Present the draft summary to the user for confirmation or edits before proceedin
 ### Step 3b: Detect Orchestrator & Extract Session Metadata
 
 **Detect orchestrator** before running the estimation script. The dispatcher
-`scripts/estimate_tokens.py` does this automatically, but you should also resolve
-these fields for the report:
+`scripts/estimate_tokens.py` auto-detects using the heuristics below, but its result
+is a **suggestion only**. In interactive (live) mode, always confirm with the user
+before proceeding (see below).
 
-| Signal | Orchestrator |
-|--------|-------------|
-| `~/.copilot/session-store.db` exists | **copilot-cli** |
-| `~/.claude/projects/` exists | claude-code (no backend yet) |
-| Otherwise | unknown — use fallback estimator |
+**Detection heuristics** (checked in this order — first match wins):
+
+| Priority | Signal | Orchestrator |
+|----------|--------|-------------|
+| 1 | `~/.copilot/session-store.db` exists **with a recent session (<1h, matching cwd)** | **copilot-cli** |
+| 2 | `~/.local/share/opencode/sessions/` or `$XDG_DATA_HOME/opencode/sessions/` exists | **opencode** |
+| 2 | `opencode.json` or `opencode.jsonc` in cwd or `~/.config/opencode/` | **opencode** (confirmation) |
+| 3 | `~/.claude/projects/` exists | claude-code (planned — not yet registered in dispatcher) |
+| — | Otherwise | unknown — use fallback estimator |
+
+> **Staleness guard:** A stale `session-store.db` from past Copilot CLI usage does
+> NOT qualify. The DB must contain a session created within the last hour whose `cwd`
+> matches the current working directory. Otherwise, detection falls through.
+
+> **Confirm with user (live mode):** Detection is heuristic-based and unreliable on
+> machines with multiple tools installed. Present the detected orchestrator and ask
+> the user to confirm or correct it:
+>
+> > Detected orchestrator: **<name>** (based on <signal>).
+> > Is this correct, or are you running in a different tool?
+>
+> If the user corrects it, use their answer. Pass `--orchestrator <name>` to the
+> script to override auto-detection.
 
 **Extract model name:**
 - Live mode: check session metadata or the `model_information` block in system context.
+  Note: in OpenCode, the system prompt declares the *current* model which may differ
+  from the model used for the bulk of the session (users switch models mid-session).
+  Model resolution here is preliminary — Step 5 always confirms with the user.
 - Retrospective: query `turns` or `checkpoints`; model may appear in assistant responses
   or session summary. Fall back to asking the user if ambiguous.
 
@@ -140,21 +162,61 @@ WHERE session_id = '<session_id>'
 ```
 
 Also check the first assistant response or system turns for `<invoked_skills>` blocks.
-List skill names, e.g. `"session-synthesis, juju-qa"`. Use `"none"` if none found.
+List skill names, e.g. `"juju-qa, jdb"`. Use `"none"` if none found.
 
-### Step 4: Estimate Token Usage
+> **Important:** Exclude `session-synthesis` itself from the listed skills. It is
+> always implicitly active during synthesis and listing it adds no signal.
 
-Run the bundled dispatcher — it auto-detects the orchestrator and delegates to the
-appropriate backend, or falls back to a base-only estimate:
+### Step 4: Prompt User for Missing Fields
+
+Ask the user (use ask_user tool when available):
+
+1. **Outcome**: ✅ Done / ⚠️ Partial / ❌ Failed
+2. **Self-rating**: 1–5 (quality of the session / was it efficient?)
+   - 5 → 🏆  |  4 → 🟢  |  3 → 🟡  |  2 → 🟠  |  1 → 🔴
+3. **Notes**: Any lessons learned, things to do differently, or follow-up actions
+4. **Output path**: Where to save (default: `~/copilot-sessions/`)
+5. **Model(s)** — ALWAYS ask, even if resolved in Step 3b. Pre-fill with the model
+   from system context as default. Format the question as:
+
+   > Model(s) used during this session. Default: `<detected model> (primary)`.
+   > If you switched models, list each with its purpose, e.g.:
+   > `claude-opus-4.5 (implementation), claude-sonnet-4.6 (synthesis)`
+   >
+   > Note: the default is the model currently active. If a different model was used
+   > for the bulk of the work, specify that as primary.
+
+   Each model entry should follow the format: `<model-name> (<purpose>[, ~<percentage>%])`.
+
+**Multi-model cost computation:**
+- If the user specifies multiple models with percentages, compute a weighted cost:
+  split the total tokens according to the given percentages and price each portion
+  with the corresponding model's rates.
+- If no percentages are given, report the cost range (cheapest to most expensive model)
+  or ask the user for an approximate split.
+- If a model is unknown/custom, skip its cost portion and note it in the report.
+
+If the user cannot identify the model, continue without pricing. Keep the token estimate and
+render the cost field as `N/A (unknown or custom model)`.
+
+### Step 5: Estimate Token Usage
+
+Run the bundled dispatcher **after confirming the model(s) with the user**.
+
+**Single-model sessions:** pass the confirmed model to `--model`:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/estimate_tokens.py" <session_id> --model <model>
+python3 "$SKILL_ROOT/scripts/estimate_tokens.py" <session_id> --model <confirmed_model>
 # or for the current (latest) session:
-python3 "$SKILL_ROOT/scripts/estimate_tokens.py" latest --model <model>
+python3 "$SKILL_ROOT/scripts/estimate_tokens.py" latest --model <confirmed_model>
 ```
 
-Where `$SKILL_ROOT` is the absolute path to the skill folder
-(`~/.copilot/skills/session-synthesis`).
+**Multi-model sessions:** omit `--model` to get token totals without pricing. Then
+compute weighted cost manually using the token totals and the rates from
+`assets/model-pricing.md`, splitting according to the percentages confirmed in Step 4.
+
+Where `$SKILL_ROOT` is the absolute path to wherever this skill is installed
+(e.g. `~/.agents/skills/session-synthesis` or `~/.copilot/skills/session-synthesis`).
 
 The dispatcher:
 1. Detects orchestrator (Copilot CLI → uses `estimate_tokens_copilot_cli.py`)
@@ -180,19 +242,6 @@ Use `--json` flag to get machine-readable output for embedding in the MD templat
 
 If the model is unknown or not listed in `assets/model-pricing.md`, skip cost estimation and
 mark it as unavailable rather than guessing. This covers local or custom models.
-
-### Step 5: Prompt User for Missing Fields
-
-Ask the user (use ask_user tool when available):
-
-1. **Outcome**: ✅ Done / ⚠️ Partial / ❌ Failed
-2. **Self-rating**: 1–5 (quality of the session / was it efficient?)
-3. **Notes**: Any lessons learned, things to do differently, or follow-up actions
-4. **Output path**: Where to save (default: `~/copilot-sessions/`)
-5. **Model** (if not already resolved in Step 3b)
-
-If the user cannot identify the model, continue without pricing. Keep the token estimate and
-render the cost field as `N/A (unknown or custom model)`.
 
 ### Step 6: Write the Markdown File
 
