@@ -104,12 +104,21 @@ these fields for the report:
 
 | Signal | Orchestrator |
 |--------|-------------|
-| `~/.copilot/session-store.db` exists | **copilot-cli** |
+| `~/.local/share/opencode/sessions/` or `$XDG_DATA_HOME/opencode/` exists | **opencode** |
+| `opencode.json` or `opencode.jsonc` in cwd or `~/.config/opencode/` | **opencode** (confirmation) |
+| `~/.copilot/session-store.db` exists **with a recent session (<1h, matching cwd)** | **copilot-cli** |
 | `~/.claude/projects/` exists | claude-code (no backend yet) |
 | Otherwise | unknown — use fallback estimator |
 
+> **Staleness guard:** A stale `session-store.db` from past Copilot CLI usage does
+> NOT qualify. The DB must contain a session created within the last hour whose `cwd`
+> matches the current working directory. Otherwise, detection falls through.
+
 **Extract model name:**
 - Live mode: check session metadata or the `model_information` block in system context.
+  Note: in OpenCode, the system prompt declares the *current* model which may differ
+  from the model used for the bulk of the session (users switch models mid-session).
+  Model resolution here is preliminary — Step 5 always confirms with the user.
 - Retrospective: query `turns` or `checkpoints`; model may appear in assistant responses
   or session summary. Fall back to asking the user if ambiguous.
 
@@ -140,7 +149,10 @@ WHERE session_id = '<session_id>'
 ```
 
 Also check the first assistant response or system turns for `<invoked_skills>` blocks.
-List skill names, e.g. `"session-synthesis, juju-qa"`. Use `"none"` if none found.
+List skill names, e.g. `"juju-qa, jdb"`. Use `"none"` if none found.
+
+> **Important:** Exclude `session-synthesis` itself from the listed skills. It is
+> always implicitly active during synthesis and listing it adds no signal.
 
 ### Step 4: Estimate Token Usage
 
@@ -185,11 +197,29 @@ mark it as unavailable rather than guessing. This covers local or custom models.
 
 Ask the user (use ask_user tool when available):
 
-1. **Outcome**: ✅ Done / ⚠️ Partial / ❌ Failed
-2. **Self-rating**: 1–5 (quality of the session / was it efficient?)
+1. **Outcome**: Done / Partial / Failed
+2. **Self-rating**: 1-5 (quality of the session / was it efficient?)
 3. **Notes**: Any lessons learned, things to do differently, or follow-up actions
 4. **Output path**: Where to save (default: `~/copilot-sessions/`)
-5. **Model** (if not already resolved in Step 3b)
+5. **Model(s)** — ALWAYS ask, even if resolved in Step 3b. Pre-fill with the model
+   from system context as default. Format the question as:
+
+   > Model(s) used during this session. Default: `<detected model> (primary)`.
+   > If you switched models, list each with its purpose, e.g.:
+   > `claude-opus-4.5 (implementation), claude-sonnet-4.6 (synthesis)`
+   >
+   > Note: the default is the model currently active. If a different model was used
+   > for the bulk of the work, specify that as primary.
+
+   Each model entry should follow the format: `<model-name> (<purpose>[, ~<percentage>%])`.
+
+**Multi-model cost computation:**
+- If the user specifies multiple models with percentages, compute a weighted cost:
+  split the total tokens according to the given percentages and price each portion
+  with the corresponding model's rates.
+- If no percentages are given, report the cost range (cheapest to most expensive model)
+  or ask the user for an approximate split.
+- If a model is unknown/custom, skip its cost portion and note it in the report.
 
 If the user cannot identify the model, continue without pricing. Keep the token estimate and
 render the cost field as `N/A (unknown or custom model)`.

@@ -9,17 +9,19 @@ Usage:
     python3 estimate_tokens.py <session_id_or_spec> [--model <model>] [--json] [--list]
 
 Supported orchestrators (auto-detected):
-    copilot-cli   — GitHub Copilot CLI (session-store.db present)
+    opencode      — OpenCode AI assistant (no backend yet — uses fallback)
+    copilot-cli   — GitHub Copilot CLI (session-store.db present + recent session)
     [future]      — Add new backends in scripts/estimate_tokens_<orchestrator>.py
 
 Fallback:
     When the orchestrator is unknown or no backend script exists, falls back to
     a base estimate: stored turn text only, without context growth, file overhead,
-    or system prompt corrections. Result is marked as "base only".
+    or system prompt corrections. Result is marked as "base only (no session store)".
 """
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -31,13 +33,67 @@ SKILL_ROOT = Path(__file__).resolve().parent.parent
 SESSION_STORE_DB = Path.home() / ".copilot" / "session-store.db"
 CHARS_PER_TOKEN = 4
 
-# ── Orchestrator detection ─────────────────────────────────────────────────────
+
+# ── Orchestrator detection helpers ─────────────────────────────────────────────
+
+def _opencode_detected() -> bool:
+    """Detect OpenCode by its session directory or config files."""
+    xdg_data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    if (xdg_data / "opencode" / "sessions").exists():
+        return True
+    if (xdg_data / "opencode").exists():
+        return True
+    # Confirmation signals: config files in cwd or user config dir
+    xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    config_locations = [
+        Path.cwd() / "opencode.json",
+        Path.cwd() / "opencode.jsonc",
+        xdg_config / "opencode" / "opencode.json",
+        xdg_config / "opencode" / "opencode.jsonc",
+    ]
+    return any(p.exists() for p in config_locations)
+
+
+def _copilot_cli_is_active() -> bool:
+    """
+    Detect Copilot CLI only if the session-store.db exists AND contains a recent
+    session (< 1 hour old) with a cwd matching the current working directory.
+
+    This prevents stale DBs from past usage from incorrectly selecting the
+    copilot-cli backend when the user is actually in a different orchestrator.
+    """
+    if not SESSION_STORE_DB.exists():
+        return False
+    try:
+        conn = sqlite3.connect(SESSION_STORE_DB)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT id FROM sessions "
+            "WHERE created_at > datetime('now', '-1 hour') "
+            "AND cwd = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (str(Path.cwd()),),
+        ).fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
+# ── Orchestrator registry ──────────────────────────────────────────────────────
 
 ORCHESTRATORS = [
     {
+        "name": "opencode",
+        "description": "OpenCode AI assistant",
+        "detect": _opencode_detected,
+        "script": None,  # No backend yet — uses fallback
+        "db": None,
+    },
+    {
         "name": "copilot-cli",
         "description": "GitHub Copilot CLI",
-        "detect": lambda: SESSION_STORE_DB.exists(),
+        "detect": _copilot_cli_is_active,
         "script": SKILL_ROOT / "scripts" / "estimate_tokens_copilot_cli.py",
         "db": SESSION_STORE_DB,
     },
@@ -47,13 +103,6 @@ ORCHESTRATORS = [
     #     "description": "Anthropic Claude Code",
     #     "detect": lambda: (Path.home() / ".claude" / "projects").exists(),
     #     "script": SKILL_ROOT / "scripts" / "estimate_tokens_claude_code.py",
-    #     "db": None,
-    # },
-    # {
-    #     "name": "vscode-copilot",
-    #     "description": "GitHub Copilot in VS Code",
-    #     "detect": lambda: ...,
-    #     "script": SKILL_ROOT / "scripts" / "estimate_tokens_vscode_copilot.py",
     #     "db": None,
     # },
 ]
@@ -79,13 +128,55 @@ def _pricing_status(model: Optional[str], priced: bool) -> str:
     return "unpriced: model not provided"
 
 
-def fallback_estimate(session_spec: str, db_path: Path, model: Optional[str]) -> dict:
+def no_session_store_report(orchestrator_name: str, model: Optional[str]) -> dict:
+    """
+    Return a report indicating no session store is available.
+    Used for orchestrators like OpenCode that have no local DB yet.
+    """
+    return {
+        "session": {
+            "id": "N/A",
+            "summary": "N/A (no session store)",
+            "repository": None,
+            "branch": None,
+            "created_at": None,
+            "updated_at": None,
+            "turn_count": None,
+        },
+        "model": model,
+        "orchestrator": orchestrator_name,
+        "estimate_type": "base only (no session store) — manual estimation required",
+        "breakdown": {
+            "base_input_tokens": 0,
+            "base_output_tokens": 0,
+        },
+        "totals": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "estimated_cost_usd": None,
+        },
+        "pricing_status": _pricing_status(model, False),
+        "untracked_overhead": [
+            "ALL tokens (no session store available for this orchestrator)",
+            "context growth (conversation history re-sent each turn)",
+            "file overhead (created/edited files)",
+            "system prompt (orchestrator fixed overhead)",
+            "web_fetch results",
+            "bash / grep / glob stdout",
+            "view / read tool outputs",
+            "injected skill context",
+        ],
+    }
+
+
+def fallback_estimate(session_spec: str, db_path: Optional[Path], model: Optional[str]) -> dict:
     """
     Base-only estimate: stored turn text divided by CHARS_PER_TOKEN.
     No context growth, file overhead, or system prompt corrections.
     Used when no orchestrator-specific backend is available.
     """
-    if not db_path.exists():
+    if db_path is None or not db_path.exists():
         return {"error": f"No session database found at {db_path}"}
 
     conn = sqlite3.connect(db_path)
@@ -279,20 +370,33 @@ def main():
     db_path = orch["db"] if orch and orch.get("db") else SESSION_STORE_DB
 
     if args.list:
-        list_sessions(db_path)
+        if db_path and db_path.exists():
+            list_sessions(db_path)
+        else:
+            print("No session database available for listing.", file=sys.stderr)
+            sys.exit(1)
         return
 
     if not args.session:
         # Print detected orchestrator and exit
         print(f"Detected orchestrator: {orch['name'] if orch else 'unknown (will use fallback)'}")
-        available = [o["name"] for o in ORCHESTRATORS if o["script"].exists()]
+        available = [o["name"] for o in ORCHESTRATORS if o.get("script") and o["script"].exists()]
         print(f"Available backends:    {', '.join(available) or 'none'}")
         parser.print_help()
         sys.exit(1)
 
-    if orch and orch["script"].exists():
+    if orch and orch.get("script") and orch["script"].exists():
         print(f"[session-synthesis] Using backend: {orch['name']}", file=sys.stderr)
         delegate_to_backend(orch["script"], args.session, args.model, args.json)
+    elif orch and not orch.get("db"):
+        # Orchestrator detected but has no session store (e.g. OpenCode)
+        name = orch["name"]
+        print(f"[session-synthesis] Orchestrator '{name}' detected — no session store available, using base-only report.", file=sys.stderr)
+        report = no_session_store_report(name, args.model)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print_fallback_report(report)
     else:
         name = orch["name"] if orch else "unknown"
         print(f"[session-synthesis] No backend for orchestrator '{name}', using fallback estimator.", file=sys.stderr)
