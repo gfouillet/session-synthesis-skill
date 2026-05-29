@@ -108,7 +108,7 @@ before proceeding (see below).
 | Priority | Signal | Orchestrator |
 |----------|--------|-------------|
 | 1 | `~/.copilot/session-store.db` exists **with a recent session (<1h, matching cwd)** | **copilot-cli** |
-| 2 | `~/.local/share/opencode/sessions/` or `$XDG_DATA_HOME/opencode/` exists | **opencode** |
+| 2 | `~/.local/share/opencode/sessions/` or `$XDG_DATA_HOME/opencode/sessions/` exists | **opencode** |
 | 2 | `opencode.json` or `opencode.jsonc` in cwd or `~/.config/opencode/` | **opencode** (confirmation) |
 | 3 | `~/.claude/projects/` exists | claude-code (no backend yet) |
 | — | Otherwise | unknown — use fallback estimator |
@@ -167,46 +167,7 @@ List skill names, e.g. `"juju-qa, jdb"`. Use `"none"` if none found.
 > **Important:** Exclude `session-synthesis` itself from the listed skills. It is
 > always implicitly active during synthesis and listing it adds no signal.
 
-### Step 4: Estimate Token Usage
-
-Run the bundled dispatcher — it auto-detects the orchestrator and delegates to the
-appropriate backend, or falls back to a base-only estimate:
-
-```bash
-python3 "$SKILL_ROOT/scripts/estimate_tokens.py" <session_id> --model <model>
-# or for the current (latest) session:
-python3 "$SKILL_ROOT/scripts/estimate_tokens.py" latest --model <model>
-```
-
-Where `$SKILL_ROOT` is the absolute path to the skill folder
-(`~/.copilot/skills/session-synthesis`).
-
-The dispatcher:
-1. Detects orchestrator (Copilot CLI → uses `estimate_tokens_copilot_cli.py`)
-2. Falls back to base-only estimate if no backend exists for the detected orchestrator
-3. Reports which backend was used and flags untracked overhead
-
-For **Copilot CLI**, the backend computes five components:
-
-| Component              | Source                                                     |
-|------------------------|------------------------------------------------------------|
-| Base input tokens      | Stored `user_message` text in `turns` table                |
-| Base output tokens     | Stored `assistant_response` text in `turns` table          |
-| Context growth         | Conversation history re-sent each turn (cumulative sum)    |
-| File overhead          | Files created/edited tracked in `session_files` table      |
-| System prompt          | Fixed CLI overhead constant (~3,000 tokens)                |
-
-Use `--json` flag to get machine-readable output for embedding in the MD template.
-
-> ⚠️ **Still untracked** (flagged in script output):
-> `web_fetch` results, `bash`/`grep`/`glob` stdout, `view` outputs, injected skill
-> context. These are not stored in the session store. The script total is a lower
-> bound — actual cost is higher in research-heavy sessions.
-
-If the model is unknown or not listed in `assets/model-pricing.md`, skip cost estimation and
-mark it as unavailable rather than guessing. This covers local or custom models.
-
-### Step 5: Prompt User for Missing Fields
+### Step 4: Prompt User for Missing Fields
 
 Ask the user (use ask_user tool when available):
 
@@ -237,6 +198,45 @@ Ask the user (use ask_user tool when available):
 
 If the user cannot identify the model, continue without pricing. Keep the token estimate and
 render the cost field as `N/A (unknown or custom model)`.
+
+### Step 5: Estimate Token Usage
+
+Run the bundled dispatcher **after confirming the model(s) with the user** — pass the
+confirmed primary model to `--model`:
+
+```bash
+python3 "$SKILL_ROOT/scripts/estimate_tokens.py" <session_id> --model <confirmed_model>
+# or for the current (latest) session:
+python3 "$SKILL_ROOT/scripts/estimate_tokens.py" latest --model <confirmed_model>
+```
+
+Where `$SKILL_ROOT` is the absolute path to the skill folder
+(`~/.agents/skills/session-synthesis`).
+
+The dispatcher:
+1. Detects orchestrator (Copilot CLI → uses `estimate_tokens_copilot_cli.py`)
+2. Falls back to base-only estimate if no backend exists for the detected orchestrator
+3. Reports which backend was used and flags untracked overhead
+
+For **Copilot CLI**, the backend computes five components:
+
+| Component              | Source                                                     |
+|------------------------|------------------------------------------------------------|
+| Base input tokens      | Stored `user_message` text in `turns` table                |
+| Base output tokens     | Stored `assistant_response` text in `turns` table          |
+| Context growth         | Conversation history re-sent each turn (cumulative sum)    |
+| File overhead          | Files created/edited tracked in `session_files` table      |
+| System prompt          | Fixed CLI overhead constant (~3,000 tokens)                |
+
+Use `--json` flag to get machine-readable output for embedding in the MD template.
+
+> ⚠️ **Still untracked** (flagged in script output):
+> `web_fetch` results, `bash`/`grep`/`glob` stdout, `view` outputs, injected skill
+> context. These are not stored in the session store. The script total is a lower
+> bound — actual cost is higher in research-heavy sessions.
+
+If the model is unknown or not listed in `assets/model-pricing.md`, skip cost estimation and
+mark it as unavailable rather than guessing. This covers local or custom models.
 
 ### Step 6: Write the Markdown File
 

@@ -41,9 +41,7 @@ def _opencode_detected() -> bool:
     xdg_data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
     if (xdg_data / "opencode" / "sessions").exists():
         return True
-    if (xdg_data / "opencode").exists():
-        return True
-    # Confirmation signals: config files in cwd or user config dir
+    # Config files in cwd or user config dir
     xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     config_locations = [
         Path.cwd() / "opencode.json",
@@ -69,7 +67,7 @@ def _copilot_cli_is_active() -> bool:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT id FROM sessions "
-            "WHERE created_at > datetime('now', '-1 hour') "
+            "WHERE datetime(created_at) > datetime('now', '-1 hour') "
             "AND cwd = ? "
             "ORDER BY created_at DESC LIMIT 1",
             (str(Path.cwd()),),
@@ -156,7 +154,7 @@ def no_session_store_report(orchestrator_name: str, model: Optional[str]) -> dic
             "total_tokens": 0,
             "estimated_cost_usd": None,
         },
-        "pricing_status": _pricing_status(model, False),
+        "pricing_status": "no tokens to price (no session store available)",
         "untracked_overhead": [
             "ALL tokens (no session store available for this orchestrator)",
             "context growth (conversation history re-sent each turn)",
