@@ -110,7 +110,7 @@ before proceeding (see below).
 | 1 | `~/.copilot/session-store.db` exists **with a recent session (<1h, matching cwd)** | **copilot-cli** |
 | 2 | `~/.local/share/opencode/sessions/` or `$XDG_DATA_HOME/opencode/sessions/` exists | **opencode** |
 | 2 | `opencode.json` or `opencode.jsonc` in cwd or `~/.config/opencode/` | **opencode** (confirmation) |
-| 3 | `~/.claude/projects/` exists | claude-code (no backend yet) |
+| 3 | `~/.claude/projects/` exists | claude-code (planned — not yet registered in dispatcher) |
 | — | Otherwise | unknown — use fallback estimator |
 
 > **Staleness guard:** A stale `session-store.db` from past Copilot CLI usage does
@@ -201,8 +201,9 @@ render the cost field as `N/A (unknown or custom model)`.
 
 ### Step 5: Estimate Token Usage
 
-Run the bundled dispatcher **after confirming the model(s) with the user** — pass the
-confirmed primary model to `--model`:
+Run the bundled dispatcher **after confirming the model(s) with the user**.
+
+**Single-model sessions:** pass the confirmed model to `--model`:
 
 ```bash
 python3 "$SKILL_ROOT/scripts/estimate_tokens.py" <session_id> --model <confirmed_model>
@@ -210,8 +211,12 @@ python3 "$SKILL_ROOT/scripts/estimate_tokens.py" <session_id> --model <confirmed
 python3 "$SKILL_ROOT/scripts/estimate_tokens.py" latest --model <confirmed_model>
 ```
 
-Where `$SKILL_ROOT` is the absolute path to the skill folder
-(`~/.agents/skills/session-synthesis`).
+**Multi-model sessions:** omit `--model` to get token totals without pricing. Then
+compute weighted cost manually using the token totals and the rates from
+`assets/model-pricing.md`, splitting according to the percentages confirmed in Step 4.
+
+Where `$SKILL_ROOT` is the absolute path to wherever this skill is installed
+(e.g. `~/.agents/skills/session-synthesis` or `~/.copilot/skills/session-synthesis`).
 
 The dispatcher:
 1. Detects orchestrator (Copilot CLI → uses `estimate_tokens_copilot_cli.py`)

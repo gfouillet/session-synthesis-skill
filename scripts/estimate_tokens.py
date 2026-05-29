@@ -370,6 +370,12 @@ def main():
     if args.list:
         if db_path and db_path.exists():
             list_sessions(db_path)
+        elif SESSION_STORE_DB.exists():
+            orch_name = orch["name"] if orch else "unknown"
+            print(f"[session-synthesis] Orchestrator '{orch_name}' has no session DB; "
+                  f"listing from Copilot CLI store instead.", file=sys.stderr)
+            print(f"  Tip: use --orchestrator copilot-cli to force.", file=sys.stderr)
+            list_sessions(SESSION_STORE_DB)
         else:
             orch_name = orch["name"] if orch else "unknown"
             print(f"No session database available for orchestrator '{orch_name}'.", file=sys.stderr)
