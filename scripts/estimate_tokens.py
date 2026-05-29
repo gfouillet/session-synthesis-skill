@@ -325,7 +325,7 @@ def print_fallback_report(report: dict) -> None:
     print()
     print(f"{'─' * 60}")
     print(f"  Session: {s['summary'] or s['id'] or '—'}")
-    print(f"  Repo:    {s['repository'] or '—'}  |  Turns: {s['turn_count'] or '—'}")
+    print(f"  Repo:    {s['repository'] or '—'}  |  Turns: {'—' if s['turn_count'] is None else s['turn_count']}")
     print(f"  Date:    {(s['created_at'] or '—')[:19]}")
     print(f"  Model:   {report['model'] or 'unknown'}")
     print(f"  Orchestrator: {report['orchestrator']}")

@@ -99,20 +99,33 @@ Present the draft summary to the user for confirmation or edits before proceedin
 ### Step 3b: Detect Orchestrator & Extract Session Metadata
 
 **Detect orchestrator** before running the estimation script. The dispatcher
-`scripts/estimate_tokens.py` does this automatically, but you should also resolve
-these fields for the report:
+`scripts/estimate_tokens.py` auto-detects using the heuristics below, but its result
+is a **suggestion only**. In interactive (live) mode, always confirm with the user
+before proceeding (see below).
 
-| Signal | Orchestrator |
-|--------|-------------|
-| `~/.local/share/opencode/sessions/` or `$XDG_DATA_HOME/opencode/` exists | **opencode** |
-| `opencode.json` or `opencode.jsonc` in cwd or `~/.config/opencode/` | **opencode** (confirmation) |
-| `~/.copilot/session-store.db` exists **with a recent session (<1h, matching cwd)** | **copilot-cli** |
-| `~/.claude/projects/` exists | claude-code (no backend yet) |
-| Otherwise | unknown — use fallback estimator |
+**Detection heuristics** (checked in this order — first match wins):
+
+| Priority | Signal | Orchestrator |
+|----------|--------|-------------|
+| 1 | `~/.copilot/session-store.db` exists **with a recent session (<1h, matching cwd)** | **copilot-cli** |
+| 2 | `~/.local/share/opencode/sessions/` or `$XDG_DATA_HOME/opencode/` exists | **opencode** |
+| 2 | `opencode.json` or `opencode.jsonc` in cwd or `~/.config/opencode/` | **opencode** (confirmation) |
+| 3 | `~/.claude/projects/` exists | claude-code (no backend yet) |
+| — | Otherwise | unknown — use fallback estimator |
 
 > **Staleness guard:** A stale `session-store.db` from past Copilot CLI usage does
 > NOT qualify. The DB must contain a session created within the last hour whose `cwd`
 > matches the current working directory. Otherwise, detection falls through.
+
+> **Confirm with user (live mode):** Detection is heuristic-based and unreliable on
+> machines with multiple tools installed. Present the detected orchestrator and ask
+> the user to confirm or correct it:
+>
+> > Detected orchestrator: **<name>** (based on <signal>).
+> > Is this correct, or are you running in a different tool?
+>
+> If the user corrects it, use their answer. Pass `--orchestrator <name>` to the
+> script to override auto-detection.
 
 **Extract model name:**
 - Live mode: check session metadata or the `model_information` block in system context.
