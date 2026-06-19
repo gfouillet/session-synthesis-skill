@@ -19,13 +19,19 @@
 - **Model(s)**: {{MODELS}}
   <!-- Format: "<model> (<purpose>[, ~<pct>%])" e.g. "claude-opus-4.5 (implementation, ~90%), claude-sonnet-4.6 (synthesis)" -->
 - **Estimate type**: {{ESTIMATE_TYPE}}
-  <!-- "Base only (no session store) — manual estimation, actual cost unknown" -->
-  <!-- "Base only (retrospective) — actual cost likely 5-20x higher in tool-heavy sessions" -->
-  <!-- "Enhanced (live, includes tool overhead)" -->
-- **Input tokens**: ~{{INPUT_TOKENS}}
-- **Output tokens**: ~{{OUTPUT_TOKENS}}
-- **Total tokens**: ~{{TOTAL_TOKENS}}
-- **Estimated cost**: {{ESTIMATED_COST}}
+  <!-- "OpenCode export telemetry — exact assistant-turn token/cost metadata" -->
+  <!-- "Enhanced Copilot CLI estimate — turns + context growth + file overhead + system prompt" -->
+  <!-- "Base only — manual estimation, actual cost unknown" -->
+- **Input tokens**: {{INPUT_TOKENS}}
+- **Output tokens**: {{OUTPUT_TOKENS}}
+- **Reasoning tokens**: {{REASONING_TOKENS}}
+- **Cache tokens**: {{CACHE_TOKENS}}
+- **Total tokens**: {{TOTAL_TOKENS}}
+- **Estimated/recorded cost**: {{ESTIMATED_COST}}
+- **Model breakdown**: {{MODEL_BREAKDOWN}}
+  <!-- OpenCode example: "openrouter/auto: 851,230 tokens, $0.000000, 100.0%" -->
+- **Mode breakdown**: {{MODE_BREAKDOWN}}
+  <!-- OpenCode example: "plan: 508,967 tokens, 59.8%; build: 342,263 tokens, 40.2%" -->
 
 ## Notes
 {{NOTES}}

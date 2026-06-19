@@ -9,7 +9,7 @@ Usage:
     python3 estimate_tokens.py <session_id_or_spec> [--model <model>] [--json] [--list]
 
 Supported orchestrators (auto-detected):
-    opencode      — OpenCode AI assistant (no backend yet — uses fallback)
+    opencode      — OpenCode AI assistant (uses opencode export telemetry)
     copilot-cli   — GitHub Copilot CLI (session-store.db present + recent session)
     [future]      — Add new backends in scripts/estimate_tokens_<orchestrator>.py
 
@@ -31,17 +31,32 @@ from typing import Optional
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 SESSION_STORE_DB = Path.home() / ".copilot" / "session-store.db"
+OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 CHARS_PER_TOKEN = 4
 
 
 # ── Orchestrator detection helpers ─────────────────────────────────────────────
 
 def _opencode_detected() -> bool:
-    """Detect OpenCode by its session directory or config files."""
+    """Detect OpenCode by a recent matching session or config files."""
+    if OPENCODE_DB.exists():
+        try:
+            conn = sqlite3.connect(OPENCODE_DB)
+            row = conn.execute(
+                "SELECT id FROM session "
+                "WHERE time_created > (unixepoch('now') - 3600) * 1000 "
+                "AND directory = ? "
+                "ORDER BY time_updated DESC LIMIT 1",
+                (str(Path.cwd()),),
+            ).fetchone()
+            conn.close()
+            if row is not None:
+                return True
+        except Exception:
+            pass
     xdg_data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
     if (xdg_data / "opencode" / "sessions").exists():
         return True
-    # Config files in cwd or user config dir
     xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     config_locations = [
         Path.cwd() / "opencode.json",
@@ -81,6 +96,13 @@ def _copilot_cli_is_active() -> bool:
 # ── Orchestrator registry ──────────────────────────────────────────────────────
 
 ORCHESTRATORS = [
+    {
+        "name": "opencode",
+        "description": "OpenCode AI assistant",
+        "detect": _opencode_detected,
+        "script": SKILL_ROOT / "scripts" / "estimate_tokens_opencode.py",
+        "db": OPENCODE_DB,
+    },
     {
         "name": "copilot-cli",
         "description": "GitHub Copilot CLI",
@@ -288,10 +310,14 @@ def compute_cost(input_tokens: int, output_tokens: int, model: Optional[str]) ->
 
 # ── Delegate to backend script ─────────────────────────────────────────────────
 
-def delegate_to_backend(script_path: Path, session_spec: str, model: Optional[str], as_json: bool) -> None:
+def delegate_to_backend(script_path: Path, session_spec: Optional[str], model: Optional[str], as_json: bool, list_only: bool = False) -> None:
     """Load and run an orchestrator-specific backend as a subprocess."""
     import subprocess
-    cmd = [sys.executable, str(script_path), session_spec]
+    cmd = [sys.executable, str(script_path)]
+    if list_only:
+        cmd.append("--list")
+    elif session_spec:
+        cmd.append(session_spec)
     if model:
         cmd.extend(["--model", model])
     if as_json:
@@ -355,6 +381,9 @@ def main():
     db_path = orch["db"] if orch and orch.get("db") else (SESSION_STORE_DB if orch is None else None)
 
     if args.list:
+        if orch and orch.get("script") and orch["script"].exists():
+            print(f"[session-synthesis] Using backend: {orch['name']}", file=sys.stderr)
+            delegate_to_backend(orch["script"], None, None, args.json, list_only=True)
         if db_path and db_path.exists():
             list_sessions(db_path)
         elif SESSION_STORE_DB.exists():

@@ -1,20 +1,21 @@
 ---
 name: session-synthesis
-description: 'Synthesize and save a Copilot session as a structured Markdown file.
-  Use when asked to "synthesize this session", "save session notes", "log this session",
-  "summarize what we did", "wrap up session", "track session cost", "record session
-  outcome", "log token usage", "retrospective on <topic>", "log last session", or
-  "synthesize session from <date>". Operates in two modes: live (current session,
-  full context available) or retrospective (past session reconstructed from session
-  store). Estimates token usage and cost, prompts for self-rating and notes, and
-  writes a structured MD report to a configurable output directory.'
+description: 'Synthesize and save an OpenCode or Copilot coding session as a structured
+  Markdown file. Use when asked to "synthesize this session", "save session notes",
+  "log this session", "summarize what we did", "wrap up session", "track session
+  cost", "record session outcome", "log token usage", "retrospective on <topic>",
+  "log last session", or "synthesize session from <date>". Operates in two modes:
+  live (current session, full context available) or retrospective (past session
+  reconstructed from session store/export data). Uses OpenCode export telemetry for
+  precise multi-model token/cost reporting when available, prompts for self-rating
+  and notes, and writes a structured MD report to a configurable output directory.'
 ---
 
 # Session Synthesis
 
-Captures a structured summary of a Copilot session — goal, approach, outcome, token
-estimate, and personal notes — and appends it to a Markdown log file for later
-efficiency analysis.
+Captures a structured summary of an AI coding assistant session — goal, approach,
+outcome, token usage, model cost, and personal notes — and appends it to a
+Markdown log file for later efficiency analysis.
 
 ## Modes
 
@@ -41,7 +42,25 @@ the session store using session id, date, repository, or keyword search.
 - The current session is already in context. Skip to Step 2.
 
 **Retrospective mode:**
-- If the user provided a session id, date, or keyword, query the session store:
+- If the user provided a session id, date, or keyword, query the relevant session store.
+
+For OpenCode, prefer the bundled list command or query `~/.local/share/opencode/opencode.db`:
+
+```bash
+python3 "$SKILL_ROOT/scripts/estimate_tokens_opencode.py" --list
+```
+
+```sql
+-- Most recent OpenCode sessions
+SELECT id, title, directory, time_created, time_updated, model, cost,
+       tokens_input, tokens_output, tokens_reasoning,
+       tokens_cache_read, tokens_cache_write
+FROM session
+ORDER BY time_updated DESC
+LIMIT 10;
+```
+
+For Copilot CLI:
 
 ```sql
 -- By date
@@ -69,7 +88,14 @@ LIMIT 5;
 
 ### Step 2: Gather Session Content
 
-**From session store (retrospective) or current context (live):**
+**From session store/export (retrospective) or current context (live):**
+
+For OpenCode, use `opencode export <session_id> > <json-file>` and read the exported
+`messages` array. User text appears in user message parts; assistant responses,
+reasoning, tool calls, token usage, mode, model, provider, and cost appear in
+assistant message `info` and `parts`.
+
+For Copilot CLI:
 
 ```sql
 -- Get checkpoints (structured summaries already exist)
@@ -107,14 +133,17 @@ before proceeding (see below).
 
 | Priority | Signal | Orchestrator |
 |----------|--------|-------------|
-| 1 | `~/.copilot/session-store.db` exists **with a recent session (<1h, matching cwd)** | **copilot-cli** |
+| 1 | `~/.local/share/opencode/opencode.db` exists **with a recent session (<1h, matching cwd)** | **opencode** |
 | 2 | `~/.local/share/opencode/sessions/` or `$XDG_DATA_HOME/opencode/sessions/` exists | **opencode** |
 | 2 | `opencode.json` or `opencode.jsonc` in cwd or `~/.config/opencode/` | **opencode** (confirmation) |
-| 3 | `~/.claude/projects/` exists | claude-code (planned — not yet registered in dispatcher) |
+| 3 | `~/.copilot/session-store.db` exists **with a recent session (<1h, matching cwd)** | **copilot-cli** |
+| 4 | `~/.claude/projects/` exists | claude-code (planned — not yet registered in dispatcher) |
 | — | Otherwise | unknown — use fallback estimator |
 
-> **Note for opencode:** Token estimation uses Tokenscope output (see Step 5b),
-> not the estimate_tokens.py backend. The dispatcher is only used for Copilot CLI sessions.
+> **Note for OpenCode:** Token and cost reporting uses `opencode export`
+> through `scripts/estimate_tokens_opencode.py`. The script redirects export output
+> into a temporary JSON file before parsing because piping OpenCode export directly
+> into another command can fail.
 
 > **Staleness guard:** A stale `session-store.db` from past Copilot CLI usage does
 > NOT qualify. The DB must contain a session created within the last hour whose `cwd`
@@ -179,8 +208,13 @@ Ask the user (use ask_user tool when available):
    - 5 → 🏆  |  4 → 🟢  |  3 → 🟡  |  2 → 🟠  |  1 → 🔴
 3. **Notes**: Any lessons learned, things to do differently, or follow-up actions
 4. **Output path**: Where to save (default: `~/copilot-sessions/`)
-5. **Model(s)** — ALWAYS ask, even if resolved in Step 3b. Pre-fill with the model
-   from system context as default. Format the question as:
+5. **Model(s)**:
+   - For OpenCode sessions, do not ask the user to estimate model percentages before
+     token reporting. `opencode export` records the model/provider, mode, tokens, cache,
+     reasoning, and cost per assistant message. Use that telemetry as the source of truth.
+   - For Copilot CLI or fallback sessions, ask for model(s) because the local store does
+     not reliably preserve per-turn model telemetry. Pre-fill with the model from system
+     context as default. Format the question as:
 
    > Model(s) used during this session. Default: `<detected model> (primary)`.
    > If you switched models, list each with its purpose, e.g.:
@@ -189,47 +223,83 @@ Ask the user (use ask_user tool when available):
    > Note: the default is the model currently active. If a different model was used
    > for the bulk of the work, specify that as primary.
 
-   Each model entry should follow the format: `<model-name> (<purpose>[, ~<percentage>%])`.
+   Each non-OpenCode model entry should follow the format: `<model-name> (<purpose>[, ~<percentage>%])`.
 
 **Multi-model cost computation:**
-- If the user specifies multiple models with percentages, compute a weighted cost:
-  split the total tokens according to the given percentages and price each portion
-  with the corresponding model's rates.
-- If no percentages are given, report the cost range (cheapest to most expensive model)
-  or ask the user for an approximate split.
+- For OpenCode, use the per-message costs and grouped model breakdown from the export.
+  Do not recompute costs from `assets/model-pricing.md` unless the export lacks costs
+  and the user explicitly asks for a manual estimate.
+- For Copilot CLI/fallback sessions, if the user specifies multiple models with
+  percentages, compute a weighted cost using `assets/model-pricing.md`.
+- If no percentages are given for non-OpenCode multi-model sessions, report the cost
+  range or ask the user for an approximate split.
 - If a model is unknown/custom, skip its cost portion and note it in the report.
 
-If the user cannot identify the model, continue without pricing. Keep the token estimate and
-render the cost field as `N/A (unknown or custom model)`.
+If the model cannot be identified and no orchestrator telemetry is available, continue
+without pricing. Keep the token estimate and render the cost field as
+`N/A (unknown or custom model)`.
 
 ### Step 5: Estimate Token Usage
 
-**For opencode sessions:** Skip this step. Proceed directly to Step 5b which uses Tokenscope output.
-
-**For Copilot CLI sessions:** Run the bundled dispatcher **after confirming the model(s) with the user**.
-
-**Single-model sessions:** pass the confirmed model to `--model`:
+Run the bundled dispatcher after confirming the orchestrator. Use `--json` when you
+need machine-readable output for the Markdown template.
 
 ```bash
-python3 "$SKILL_ROOT/scripts/estimate_tokens.py" <session_id> --model <confirmed_model>
-# or for the current (latest) session:
-python3 "$SKILL_ROOT/scripts/estimate_tokens.py" latest --model <confirmed_model>
+python3 "$SKILL_ROOT/scripts/estimate_tokens.py" <session_id> --json
+# or for the current/latest session:
+python3 "$SKILL_ROOT/scripts/estimate_tokens.py" latest --json
 ```
-
-**Multi-model sessions:** omit `--model` to get token totals without pricing. Then
-compute weighted cost manually using the token totals and the rates from
-`assets/model-pricing.md`, splitting according to the percentages confirmed in Step 4.
 
 Where `$SKILL_ROOT` is the absolute path to wherever this skill is installed
 (e.g. `~/.agents/skills/session-synthesis` or `~/.copilot/skills/session-synthesis`).
 
-The dispatcher:
-1. Detects orchestrator (Copilot CLI → uses `estimate_tokens_copilot_cli.py`)
-2. Falls back to base-only estimate if no backend exists for the detected orchestrator
-3. Reports which backend was used and flags untracked overhead
+**For OpenCode sessions:**
 
-> **For opencode:** The dispatcher falls back to base-only estimate, which is not recommended.
-> Use `/tokenscope` instead and see Step 5b.
+The dispatcher routes to `scripts/estimate_tokens_opencode.py`, which runs:
+
+```bash
+opencode export <session_id> > <temporary-json-file>
+```
+
+This redirection is intentional. Do not pipe `opencode export <session_id>` directly
+into `jq`, Python, or another process; OpenCode export can fail unless stdout is a
+regular file. The backend then parses that JSON file and reports:
+
+- exact input, output, reasoning, cache-read, and cache-write tokens from assistant turns
+- recorded OpenCode cost from per-message telemetry
+- per-model/provider breakdown for multi-model sessions
+- per-mode breakdown such as `plan` vs `build`
+- session metadata from the export (`title`, directory, timestamps, OpenCode version)
+
+For OpenCode multi-model sessions, prefer the script's `model_breakdown` and
+`mode_breakdown` over user-estimated percentages. If `estimated_cost_usd` is `0`,
+report it as the value recorded by OpenCode and note that some providers/routes may
+not return priced cost metadata.
+
+You can also run the OpenCode backend directly:
+
+```bash
+python3 "$SKILL_ROOT/scripts/estimate_tokens_opencode.py" <session_id> --json
+python3 "$SKILL_ROOT/scripts/estimate_tokens_opencode.py" latest --json
+python3 "$SKILL_ROOT/scripts/estimate_tokens_opencode.py" --list
+```
+
+**For Copilot CLI sessions:**
+
+Pass the confirmed model to `--model` for single-model pricing:
+
+```bash
+python3 "$SKILL_ROOT/scripts/estimate_tokens.py" <session_id> --model <confirmed_model> --json
+```
+
+For Copilot CLI multi-model sessions, omit `--model` to get token totals without
+pricing. Then compute weighted cost manually using the rates from
+`assets/model-pricing.md`, splitting according to the percentages confirmed in Step 4.
+
+The dispatcher:
+1. Detects orchestrator (OpenCode → `estimate_tokens_opencode.py`; Copilot CLI → `estimate_tokens_copilot_cli.py`)
+2. Falls back to base-only estimate if no backend exists for the detected orchestrator
+3. Reports which backend was used and flags untracked overhead where applicable
 
 For **Copilot CLI**, the backend computes five components:
 
@@ -241,47 +311,31 @@ For **Copilot CLI**, the backend computes five components:
 | File overhead          | Files created/edited tracked in `session_files` table      |
 | System prompt          | Fixed CLI overhead constant (~3,000 tokens)                |
 
-Use `--json` flag to get machine-readable output for embedding in the MD template.
-
-> ⚠️ **Still untracked** (flagged in script output):
+> ⚠️ **Still untracked for Copilot CLI/fallback estimates** (flagged in script output):
 > `web_fetch` results, `bash`/`grep`/`glob` stdout, `view` outputs, injected skill
-> context. These are not stored in the session store. The script total is a lower
-> bound — actual cost is higher in research-heavy sessions.
+> context. These are not stored in the Copilot session store. The script total is a
+> lower bound — actual cost is higher in research-heavy sessions.
 
-If the model is unknown or not listed in `assets/model-pricing.md`, skip cost estimation and
-mark it as unavailable rather than guessing. This covers local or custom models.
+If the model is unknown or not listed in `assets/model-pricing.md`, skip manual cost
+estimation and mark it as unavailable rather than guessing. This covers local or
+custom models.
 
-### Step 5b: Check for Tokenscope Analysis (Optional)
+### Step 5b: Check for Tokenscope Analysis (Optional Cross-Check)
 
-If the user has run `/tokenscope` during the session, a detailed analysis file may exist.
+For OpenCode, `opencode export` is the primary source because it contains per-turn
+model, token, cache, reasoning, and cost metadata. If the user has run `/tokenscope`,
+use its output only as an optional cross-check or explanatory supplement for tool-heavy
+sessions.
 
-First, query the opencode database to find the session's working directory:
+If Tokenscope output exists, parse it for:
 
-```bash
-python3 -c "
-import sqlite3, json
-c = sqlite3.connect('$HOME/.local/share/opencode/opencode.db')
-r = c.execute('SELECT directory FROM session WHERE id = ?', ('<session_id>',)).fetchone()
-print(r[0] if r else '')
-"
-```
+- token breakdown by category (system/user/tools/assistant/reasoning)
+- tool usage statistics and top token contributors
+- cache efficiency metrics
+- subagent breakdown (if `includeSubagents` was true)
 
-Then check if Tokenscope output exists:
-
-```bash
-ls <directory>/token-usage-output.txt
-```
-
-If it exists, read and parse it for:
-
-- Token breakdown by category (system/user/tools/assistant/reasoning)
-- Tool usage statistics (which tools consumed most tokens, call counts)
-- Cache efficiency metrics (hit rate, cost savings)
-- Top token contributors
-- Subagent breakdown (if `includeSubagents` was true)
-
-This provides richer detail than raw DB queries. When Tokenscope output is available,
-skip DB token queries entirely — Tokenscope already extracted exact telemetry from opencode.
+Do not replace OpenCode export totals with Tokenscope totals unless the export is
+missing telemetry or the user explicitly asks for the Tokenscope view.
 
 ### Step 6: Write the Markdown File
 
@@ -316,15 +370,21 @@ Report the file path written and show a brief preview of the synthesis header.
 
 | Component              | Formula / Source                                           |
 |------------------------|------------------------------------------------------------|
-| Base input tokens      | `sum(len(user_message chars)) / 4`                         |
-| Base output tokens     | `sum(len(assistant_response chars)) / 4`                   |
-| Context growth         | Cumulative re-send of prior turns per input call           |
-| File overhead          | `session_files` disk sizes / 4                             |
-| System prompt          | ~3,000 tokens fixed for Copilot CLI                        |
-| Estimated cost         | Computed only when the model matches `assets/model-pricing.md` |
+| OpenCode input/output/reasoning/cache | `opencode export` assistant message telemetry |
+| OpenCode model split   | Group exported assistant turns by `providerID` + `modelID` |
+| OpenCode mode split    | Group exported assistant turns by `mode` / `agent`         |
+| OpenCode cost          | Sum exported assistant message `cost` values               |
+| Copilot base input     | `sum(len(user_message chars)) / 4`                         |
+| Copilot base output    | `sum(len(assistant_response chars)) / 4`                   |
+| Copilot context growth | Cumulative re-send of prior turns per input call           |
+| Copilot file overhead  | `session_files` disk sizes / 4                             |
+| Copilot system prompt  | ~3,000 tokens fixed for Copilot CLI                        |
+| Manual estimated cost  | Computed only when the model matches `assets/model-pricing.md` |
 
-Always mark estimates with `~` prefix (e.g. `~26,000 input tokens`).
-Always note whether the estimate is **script-computed (copilot-cli)**, **script-computed (fallback)**, or **base only**.
+For OpenCode, treat the export values as recorded telemetry, not estimates. For
+Copilot CLI and fallback estimates, mark estimates with `~` prefix (e.g. `~26,000
+input tokens`). Always note whether the estimate is **opencode export telemetry**,
+**script-computed (copilot-cli)**, **script-computed (fallback)**, or **base only**.
 
 ## Bundled Assets
 
@@ -332,7 +392,8 @@ Always note whether the estimate is **script-computed (copilot-cli)**, **script-
 |-------|-------------|
 | `assets/template.md` | Step 6 — use as the output MD template |
 | `assets/model-pricing.md` | Reference — script uses this table for cost calculation |
-| `scripts/estimate_tokens.py` | Step 4 — orchestrator dispatcher; run to compute token/cost estimate |
+| `scripts/estimate_tokens.py` | Step 5 — orchestrator dispatcher; run to compute token/cost estimate |
+| `scripts/estimate_tokens_opencode.py` | Called automatically by dispatcher for OpenCode export telemetry |
 | `scripts/estimate_tokens_copilot_cli.py` | Called automatically by dispatcher for Copilot CLI sessions |
 
 ## Extending to New Orchestrators
