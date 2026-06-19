@@ -113,6 +113,9 @@ before proceeding (see below).
 | 3 | `~/.claude/projects/` exists | claude-code (planned — not yet registered in dispatcher) |
 | — | Otherwise | unknown — use fallback estimator |
 
+> **Note for opencode:** Token estimation uses Tokenscope output (see Step 5b),
+> not the estimate_tokens.py backend. The dispatcher is only used for Copilot CLI sessions.
+
 > **Staleness guard:** A stale `session-store.db` from past Copilot CLI usage does
 > NOT qualify. The DB must contain a session created within the last hour whose `cwd`
 > matches the current working directory. Otherwise, detection falls through.
@@ -201,7 +204,9 @@ render the cost field as `N/A (unknown or custom model)`.
 
 ### Step 5: Estimate Token Usage
 
-Run the bundled dispatcher **after confirming the model(s) with the user**.
+**For opencode sessions:** Skip this step. Proceed directly to Step 5b which uses Tokenscope output.
+
+**For Copilot CLI sessions:** Run the bundled dispatcher **after confirming the model(s) with the user**.
 
 **Single-model sessions:** pass the confirmed model to `--model`:
 
@@ -223,6 +228,9 @@ The dispatcher:
 2. Falls back to base-only estimate if no backend exists for the detected orchestrator
 3. Reports which backend was used and flags untracked overhead
 
+> **For opencode:** The dispatcher falls back to base-only estimate, which is not recommended.
+> Use `/tokenscope` instead and see Step 5b.
+
 For **Copilot CLI**, the backend computes five components:
 
 | Component              | Source                                                     |
@@ -242,6 +250,38 @@ Use `--json` flag to get machine-readable output for embedding in the MD templat
 
 If the model is unknown or not listed in `assets/model-pricing.md`, skip cost estimation and
 mark it as unavailable rather than guessing. This covers local or custom models.
+
+### Step 5b: Check for Tokenscope Analysis (Optional)
+
+If the user has run `/tokenscope` during the session, a detailed analysis file may exist.
+
+First, query the opencode database to find the session's working directory:
+
+```bash
+python3 -c "
+import sqlite3, json
+c = sqlite3.connect('$HOME/.local/share/opencode/opencode.db')
+r = c.execute('SELECT directory FROM session WHERE id = ?', ('<session_id>',)).fetchone()
+print(r[0] if r else '')
+"
+```
+
+Then check if Tokenscope output exists:
+
+```bash
+ls <directory>/token-usage-output.txt
+```
+
+If it exists, read and parse it for:
+
+- Token breakdown by category (system/user/tools/assistant/reasoning)
+- Tool usage statistics (which tools consumed most tokens, call counts)
+- Cache efficiency metrics (hit rate, cost savings)
+- Top token contributors
+- Subagent breakdown (if `includeSubagents` was true)
+
+This provides richer detail than raw DB queries. When Tokenscope output is available,
+skip DB token queries entirely — Tokenscope already extracted exact telemetry from opencode.
 
 ### Step 6: Write the Markdown File
 

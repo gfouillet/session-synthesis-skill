@@ -88,21 +88,6 @@ ORCHESTRATORS = [
         "script": SKILL_ROOT / "scripts" / "estimate_tokens_copilot_cli.py",
         "db": SESSION_STORE_DB,
     },
-    {
-        "name": "opencode",
-        "description": "OpenCode AI assistant",
-        "detect": _opencode_detected,
-        "script": None,  # No backend yet — uses fallback
-        "db": None,
-    },
-    # ── Add future orchestrators here ──
-    # {
-    #     "name": "claude-code",
-    #     "description": "Anthropic Claude Code",
-    #     "detect": lambda: (Path.home() / ".claude" / "projects").exists(),
-    #     "script": SKILL_ROOT / "scripts" / "estimate_tokens_claude_code.py",
-    #     "db": None,
-    # },
 ]
 
 
@@ -303,10 +288,12 @@ def compute_cost(input_tokens: int, output_tokens: int, model: Optional[str]) ->
 
 # ── Delegate to backend script ─────────────────────────────────────────────────
 
-def delegate_to_backend(script_path: Path, session_spec: str, model: str, as_json: bool) -> None:
+def delegate_to_backend(script_path: Path, session_spec: str, model: Optional[str], as_json: bool) -> None:
     """Load and run an orchestrator-specific backend as a subprocess."""
     import subprocess
-    cmd = [sys.executable, str(script_path), session_spec, "--model", model]
+    cmd = [sys.executable, str(script_path), session_spec]
+    if model:
+        cmd.extend(["--model", model])
     if as_json:
         cmd.append("--json")
     result = subprocess.run(cmd)
