@@ -310,7 +310,7 @@ def compute_cost(input_tokens: int, output_tokens: int, model: Optional[str]) ->
 
 # ── Delegate to backend script ─────────────────────────────────────────────────
 
-def delegate_to_backend(script_path: Path, session_spec: Optional[str], model: Optional[str], as_json: bool, list_only: bool = False) -> None:
+def delegate_to_backend(script_path: Path, session_spec: Optional[str], model: Optional[str], as_json: bool, include_subagents: bool = False, list_only: bool = False, openrouter_api_key: Optional[str] = None) -> None:
     """Load and run an orchestrator-specific backend as a subprocess."""
     import subprocess
     cmd = [sys.executable, str(script_path)]
@@ -322,6 +322,10 @@ def delegate_to_backend(script_path: Path, session_spec: Optional[str], model: O
         cmd.extend(["--model", model])
     if as_json:
         cmd.append("--json")
+    if include_subagents:
+        cmd.append("--include-subagents")
+    if openrouter_api_key:
+        cmd.extend(["--openrouter-api-key", openrouter_api_key])
     result = subprocess.run(cmd)
     sys.exit(result.returncode)
 
@@ -372,6 +376,10 @@ def main():
     parser.add_argument("--list", action="store_true", help="List recent sessions")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--orchestrator", help="Force a specific orchestrator name")
+    parser.add_argument("--include-subagents", action="store_true",
+                        help="Include related sessions (same project, overlapping time) in cost rollup (OpenCode only)")
+    parser.add_argument("--openrouter-api-key",
+                        help="OpenRouter API key for per-model pricing from GET /api/v1/models")
     args = parser.parse_args()
 
     orch = detect_orchestrator()
@@ -383,7 +391,7 @@ def main():
     if args.list:
         if orch and orch.get("script") and orch["script"].exists():
             print(f"[session-synthesis] Using backend: {orch['name']}", file=sys.stderr)
-            delegate_to_backend(orch["script"], None, None, args.json, list_only=True)
+            delegate_to_backend(orch["script"], None, None, args.json, list_only=True, include_subagents=args.include_subagents, openrouter_api_key=args.openrouter_api_key)
         if db_path and db_path.exists():
             list_sessions(db_path)
         elif SESSION_STORE_DB.exists():
@@ -408,7 +416,7 @@ def main():
 
     if orch and orch.get("script") and orch["script"].exists():
         print(f"[session-synthesis] Using backend: {orch['name']}", file=sys.stderr)
-        delegate_to_backend(orch["script"], args.session, args.model, args.json)
+        delegate_to_backend(orch["script"], args.session, args.model, args.json, include_subagents=args.include_subagents, openrouter_api_key=args.openrouter_api_key)
     elif orch and not orch.get("db"):
         # Orchestrator detected but has no session store (e.g. OpenCode)
         name = orch["name"]

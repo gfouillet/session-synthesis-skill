@@ -3,10 +3,14 @@
 
 import argparse
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,6 +101,254 @@ def export_session(session_id: str, export_file: Optional[Path], keep_export: bo
         return data
 
 
+def find_related_sessions(conn: sqlite3.Connection, session_id: str) -> list[dict]:
+    """Query DB for other sessions related to the given session.
+
+    Matches sessions with the same ``project_id``, created within the main
+    session's time window, excluding the main session itself.  No agent-type
+    filter is applied — any session sharing the project and time window is
+    considered related.
+    """
+    row = conn.execute(
+        "SELECT project_id, time_created, time_updated FROM session WHERE id = ?",
+        (session_id,),
+    ).fetchone()
+    if not row or not row["project_id"]:
+        return []
+
+    rows = conn.execute(
+        """
+        SELECT id, title, agent, model, cost,
+               tokens_input, tokens_output, tokens_reasoning,
+               tokens_cache_read, tokens_cache_write
+        FROM session
+        WHERE project_id = ? AND id != ?
+          AND time_created >= ? AND time_created <= ? + 60000
+        ORDER BY time_created
+        """,
+        (row["project_id"], session_id, row["time_created"], row["time_updated"]),
+    )
+    return [dict(r) for r in rows]
+
+
+PRICING_CACHE_PATH = Path(tempfile.gettempdir()) / "openrouter_pricing_cache.json"
+PRICING_CACHE_TTL = 3600  # 1 hour
+
+
+def resolve_openrouter_api_key(provided: Optional[str]) -> Optional[str]:
+    """Resolve the OpenRouter API key from CLI arg, env var, or auth.json."""
+    if provided:
+        return provided
+    env_key = os.environ.get("OPENROUTER_API_KEY")
+    if env_key:
+        return env_key
+    auth_paths = [
+        Path.home() / ".local" / "share" / "opencode" / "auth.json",
+        Path.home() / ".config" / "opencode" / "auth.json",
+    ]
+    for p in auth_paths:
+        if p.exists():
+            try:
+                auth = json.loads(p.read_text())
+                key = auth.get("openrouter", {}).get("key")
+                if key:
+                    return key
+            except (json.JSONDecodeError, OSError, KeyError):
+                pass
+    return None
+
+
+def fetch_openrouter_pricing(api_key: str) -> dict[str, dict[str, float]]:
+    """Fetch per-token pricing from OpenRouter API with disk caching.
+
+    Returns ``{model_id: {prompt, completion, input_cache_read, input_cache_write}}``.
+    All prices are per-token (e.g. ``0.0000005`` = $0.50 / 1M tokens).
+    """
+    if PRICING_CACHE_PATH.exists():
+        age = time.time() - PRICING_CACHE_PATH.stat().st_mtime
+        if age < PRICING_CACHE_TTL:
+            try:
+                return json.loads(PRICING_CACHE_PATH.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = json.loads(resp.read())
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, json.JSONDecodeError):
+        # If stale cache exists, use it as fallback
+        if PRICING_CACHE_PATH.exists():
+            try:
+                return json.loads(PRICING_CACHE_PATH.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {}
+
+    pricing = {}
+    for m in raw.get("data", []):
+        mid = m.get("id")
+        if not mid:
+            continue
+        p = m.get("pricing") or {}
+        pricing[mid] = {
+            "prompt": float(p.get("prompt", 0)),
+            "completion": float(p.get("completion", 0)),
+            "input_cache_read": float(p.get("input_cache_read", 0)),
+            "input_cache_write": float(p.get("input_cache_write", 0)),
+        }
+
+    try:
+        PRICING_CACHE_PATH.write_text(json.dumps(pricing))
+    except OSError:
+        pass
+
+    return pricing
+
+
+def compute_openrouter_cost(
+    tokens_input: int,
+    tokens_output: int,
+    tokens_cache_read: int,
+    tokens_cache_write: int,
+    model_pricing: dict[str, float],
+) -> float:
+    return (
+        tokens_input * model_pricing.get("prompt", 0)
+        + tokens_output * model_pricing.get("completion", 0)
+        + tokens_cache_read * model_pricing.get("input_cache_read", 0)
+        + tokens_cache_write * model_pricing.get("input_cache_write", 0)
+    )
+
+
+def add_subagent_data(report: dict, subagents: list[dict], pricing: Optional[dict] = None) -> None:
+    """Merge related-session (sub-agent) costs and tokens into the main report.
+
+    Adds a ``subagent_sessions`` list to the report and updates totals,
+    model_breakdown, and pricing_status.
+
+    ``subagents`` should come from :func:`find_related_sessions` — any session
+    sharing the same project and time window is included (no agent-type filter).
+
+    If ``pricing`` (from :func:`fetch_openrouter_pricing`) is provided,
+    costs for OpenRouter sub-agents are recomputed from token counts × API pricing.
+    """
+    entries = []
+    sa_total_cost = 0.0
+    sa_total_tokens = 0
+
+    for sa in subagents:
+        inp = int(sa.get("tokens_input") or 0)
+        out = int(sa.get("tokens_output") or 0)
+        reas = int(sa.get("tokens_reasoning") or 0)
+        cr = int(sa.get("tokens_cache_read") or 0)
+        cw = int(sa.get("tokens_cache_write") or 0)
+        total = inp + out + reas + cr + cw
+
+        model_raw = sa.get("model")
+        model_id = None
+        provider_id = None
+        if model_raw:
+            try:
+                parsed = json.loads(model_raw) if isinstance(model_raw, str) else model_raw
+                model_id = parsed.get("id")
+                provider_id = parsed.get("providerID")
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+        cost = float(sa.get("cost") or 0)
+        if pricing and provider_id == "openrouter" and model_id in pricing:
+            cost = compute_openrouter_cost(inp, out, cr, cw, pricing[model_id])
+
+        sa_total_cost += cost
+        sa_total_tokens += total
+
+        entries.append({
+            "id": sa["id"],
+            "title": sa.get("title"),
+            "agent": sa.get("agent"),
+            "model_id": model_id,
+            "provider_id": provider_id,
+            "cost_usd": round(cost, 6),
+            "input_tokens": inp,
+            "output_tokens": out,
+            "reasoning_tokens": reas,
+            "cache_read_tokens": cr,
+            "cache_write_tokens": cw,
+            "total_tokens": total,
+        })
+
+    report["subagent_sessions"] = entries
+
+    # Roll up into totals
+    t = report["totals"]
+    b = report["breakdown"]
+    for k in ("input_tokens", "output_tokens", "reasoning_tokens",
+              "cache_read_tokens", "cache_write_tokens"):
+        sa_sum = sum(e[k] for e in entries)
+        t[k] += sa_sum
+        b[k] += sa_sum
+    t["total_tokens"] += sa_total_tokens
+    t["estimated_cost_usd"] = round(t["estimated_cost_usd"] + sa_total_cost, 6)
+
+    # Roll up into model_breakdown
+    for e in entries:
+        if e["model_id"]:
+            label = f"{e['provider_id']}/{e['model_id']}" if e["provider_id"] and not e["model_id"].startswith(f"{e['provider_id']}/") else e["model_id"]
+            existing = [m for m in report["model_breakdown"] if m["model"] == label]
+            if existing:
+                m = existing[0]
+                for k in ("input_tokens", "output_tokens", "reasoning_tokens",
+                          "cache_read_tokens", "cache_write_tokens"):
+                    m[k] += e[k]
+                m["total_tokens"] += e["total_tokens"]
+                m["cost_usd"] += e["cost_usd"]
+                m["assistant_turns"] += 1
+            else:
+                report["model_breakdown"].append({
+                    "model": label,
+                    "share_pct": 0.0,
+                    "input_tokens": e["input_tokens"],
+                    "output_tokens": e["output_tokens"],
+                    "reasoning_tokens": e["reasoning_tokens"],
+                    "cache_read_tokens": e["cache_read_tokens"],
+                    "cache_write_tokens": e["cache_write_tokens"],
+                    "total_tokens": e["total_tokens"],
+                    "cost_usd": e["cost_usd"],
+                    "assistant_turns": 1,
+                })
+
+    # Recalculate percentages
+    for m in report["model_breakdown"]:
+        m["share_pct"] = round(m["total_tokens"] / t["total_tokens"] * 100, 1) if t["total_tokens"] else 0.0
+
+    or_priced = pricing and any(
+        e.get("provider_id") == "openrouter" and e.get("model_id") in pricing
+        for e in entries
+    )
+    if or_priced:
+        report["estimate_type"] = (
+            "exact telemetry (opencode export + DB sub-agent rollup; "
+            "main OpenRouter session priced via API, sub-agents from API pricing)"
+        )
+        report["pricing_status"] = (
+            "OpenRouter models priced via GET /api/v1/models per-token rates; "
+            "non-OpenRouter sub-agents use DB session.cost"
+        )
+    else:
+        report["estimate_type"] = (
+            "exact telemetry (opencode export + DB sub-agent rollup; "
+            "main session from export, sub-agents from session.cost in DB)"
+        )
+        report["pricing_status"] = (
+            "cost read from OpenCode export metadata and DB session.cost "
+            "(includes OpenRouter usage.cost telemetry for sub-agents)"
+        )
+
+
 def empty_usage() -> dict[str, float]:
     return {
         "input_tokens": 0,
@@ -134,7 +386,7 @@ def model_label(provider: Optional[str], model: Optional[str]) -> str:
     return model or provider or "unknown"
 
 
-def build_report(data: dict) -> dict:
+def build_report(data: dict, pricing: Optional[dict] = None) -> dict:
     info = data.get("info") or {}
     session_tokens = info.get("tokens") or {}
     totals = empty_usage()
@@ -143,6 +395,7 @@ def build_report(data: dict) -> dict:
     model_order = []
     mode_order = []
     user_turns = 0
+    flag_or_priced = False
 
     for message in data.get("messages") or []:
         msg = message.get("info") or message
@@ -163,7 +416,17 @@ def build_report(data: dict) -> dict:
             model_order.append(label)
         if mode not in by_mode:
             mode_order.append(mode)
+
         cost = msg.get("cost")
+        if pricing and provider == "openrouter" and model in pricing:
+            cache = tokens.get("cache") or {}
+            t_input = int(tokens.get("input") or 0)
+            t_output = int(tokens.get("output") or 0)
+            t_cache_read = int(cache.get("read") or tokens.get("cache_read") or 0)
+            t_cache_write = int(cache.get("write") or tokens.get("cache_write") or 0)
+            cost = compute_openrouter_cost(t_input, t_output, t_cache_read, t_cache_write, pricing[model])
+            flag_or_priced = True
+
         add_usage(totals, tokens, cost)
         add_usage(by_model[label], tokens, cost)
         add_usage(by_mode[mode], tokens, cost)
@@ -190,6 +453,14 @@ def build_report(data: dict) -> dict:
 
     created = (info.get("time") or {}).get("created") or info.get("time_created")
     updated = (info.get("time") or {}).get("updated") or info.get("time_updated")
+
+    if flag_or_priced:
+        estimate_type = "exact telemetry (OpenCode export, OpenRouter models priced via GET /api/v1/models)"
+        pricing_status = "OpenRouter models priced via per-token rates from GET /api/v1/models; non-OpenRouter models use export cost"
+    else:
+        estimate_type = "exact telemetry (opencode export; assistant turns grouped by model/mode)"
+        pricing_status = "cost read from OpenCode export metadata; no manual pricing table used"
+
     return {
         "session": {
             "id": info.get("id"),
@@ -204,7 +475,7 @@ def build_report(data: dict) -> dict:
         },
         "model": ", ".join(item["model"] for item in model_breakdown if item["assistant_turns"] or len(model_breakdown) == 1),
         "orchestrator": "opencode",
-        "estimate_type": "exact telemetry (opencode export; assistant turns grouped by model/mode)",
+        "estimate_type": estimate_type,
         "breakdown": {
             "input_tokens": totals["input_tokens"],
             "output_tokens": totals["output_tokens"],
@@ -221,7 +492,7 @@ def build_report(data: dict) -> dict:
             "total_tokens": totals["total_tokens"],
             "estimated_cost_usd": round(totals["cost_usd"], 6),
         },
-        "pricing_status": "cost read from OpenCode export metadata; no manual pricing table used",
+        "pricing_status": pricing_status,
         "model_breakdown": model_breakdown,
         "mode_breakdown": mode_breakdown,
         "untracked_overhead": [],
@@ -250,6 +521,12 @@ def print_report(report: dict) -> None:
     print("─" * 72)
     print(f"  Recorded cost:       ${t['estimated_cost_usd']:.6f}")
     print("─" * 72)
+    if report.get("subagent_sessions"):
+        print(f"  Includes {len(report['subagent_sessions'])} sub-agent sessions:")
+        for sa in report["subagent_sessions"]:
+            model = sa["model_id"] or "?"
+            print(f"    {sa['agent']:<10} {model:<30} ${sa['cost_usd']:<8.6f}  {sa['title'][:40]}")
+        print("─" * 72)
     if report["model_breakdown"]:
         print("  By model:")
         for item in report["model_breakdown"]:
@@ -276,6 +553,16 @@ def main() -> None:
     parser.add_argument("--db", default=str(OPENCODE_DB), help="Path to OpenCode database")
     parser.add_argument("--export-file", help="Parse an existing OpenCode export JSON file")
     parser.add_argument("--keep-export", action="store_true", help="Keep a copy of the exported JSON in cwd")
+    parser.add_argument(
+        "--include-subagents",
+        action="store_true",
+        help="Query DB for related sessions (same project, overlapping time window) and roll up their costs and tokens",
+    )
+    parser.add_argument(
+        "--openrouter-api-key",
+        help="OpenRouter API key for fetching per-model pricing from GET /api/v1/models. "
+        "If omitted, checks OPENROUTER_API_KEY env var, then auth.json.",
+    )
     args = parser.parse_args()
 
     export_file = Path(args.export_file) if args.export_file else None
@@ -287,6 +574,11 @@ def main() -> None:
         list_sessions(conn)
         return
 
+    pricing = None
+    or_key = resolve_openrouter_api_key(args.openrouter_api_key)
+    if or_key:
+        pricing = fetch_openrouter_pricing(or_key)
+
     if export_file:
         data = export_session("export-file", export_file, False)
     else:
@@ -296,7 +588,16 @@ def main() -> None:
         session_id = resolve_session_id(conn, args.session)
         data = export_session(session_id, None, args.keep_export)
 
-    report = build_report(data)
+    report = build_report(data, pricing)
+
+    if args.include_subagents:
+        if conn is None:
+            print("Warning: --include-subagents requires a DB connection; skipping sub-agent rollup", file=sys.stderr)
+        elif not args.export_file and args.session:
+            subagents = find_related_sessions(conn, session_id)
+            if subagents:
+                add_subagent_data(report, subagents, pricing)
+
     if args.json:
         print(json.dumps(report, indent=2))
     else:

@@ -32,6 +32,9 @@
   <!-- OpenCode example: "openrouter/auto: 851,230 tokens, $0.000000, 100.0%" -->
 - **Mode breakdown**: {{MODE_BREAKDOWN}}
   <!-- OpenCode example: "plan: 508,967 tokens, 59.8%; build: 342,263 tokens, 40.2%" -->
+- **Sub-agents**: {{SUBAGENT_COST}}
+  <!-- Omit this line if there are no sub-agents.
+       OpenCode example: "4 sub-agent sessions (+$2.59)" -->
 
 ## Notes
 {{NOTES}}

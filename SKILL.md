@@ -169,6 +169,13 @@ before proceeding (see below).
 
 **Extract sub-agents invoked:**
 
+For OpenCode, use `--include-subagents` in Step 5 to automatically detect
+related sessions from the DB (same project, time overlap, any agent type).
+Their costs and tokens are rolled up into the report and listed individually.
+See Step 5 for details.
+
+For Copilot CLI (fallback), use:
+
 ```sql
 -- Sub-agent IDs appear as "agent_id" references in assistant responses (Copilot CLI task tool)
 SELECT turn_index, substr(assistant_response, 1, 300) AS snippet
@@ -271,6 +278,48 @@ regular file. The backend then parses that JSON file and reports:
 - per-mode breakdown such as `plan` vs `build`
 - session metadata from the export (`title`, directory, timestamps, OpenCode version)
 
+**OpenRouter pricing via API (recommended):** Pass `--openrouter-api-key <KEY>` to
+fetch live per-token pricing from `GET https://openrouter.ai/api/v1/models` and
+recompute costs for any OpenRouter models found in the export. The key is
+auto-detected from `OPENROUTER_API_KEY` env var or `auth.json` if available. The
+pricing is cached on disk (`/tmp/openrouter_pricing_cache.json`, 1-hour TTL) to
+avoid repeated API calls.
+
+When OpenRouter pricing is active:
+- Costs for `openrouter/` provider messages are computed as: `(input_tokens ×
+  prompt_price) + (output_tokens × completion_price) + (cache_read ×
+  cache_read_price) + (cache_write × cache_write_price)`
+- Non-OpenRouter models (opencode free tier, github-copilot) keep their export cost
+- The `estimate_type` and `pricing_status` fields note that OpenRouter models used
+  API-based pricing
+
+```bash
+python3 "$SKILL_ROOT/scripts/estimate_tokens_opencode.py" <session_id> --json --openrouter-api-key "$OPENROUTER_API_KEY"
+```
+
+You can also pass via the dispatcher:
+
+```bash
+python3 "$SKILL_ROOT/scripts/estimate_tokens.py" <session_id> --json --openrouter-api-key "$OPENROUTER_API_KEY"
+```
+
+**Sub-agent rollup (OpenCode only):** Pass `--include-subagents`
+to automatically detect related sessions and roll up their costs and tokens. The
+script queries the DB for any session with the same `project_id`, created within
+the main session's time window (excluding the main session itself), without
+restricting by agent type. Each related session is listed individually in the
+report's ``subagent_sessions`` array. OpenRouter pricing applies to OpenRouter
+sub-agents too when ``--openrouter-api-key`` is provided.
+
+```bash
+# Main session priced via OpenRouter API, sub-agents too:
+python3 "$SKILL_ROOT/scripts/estimate_tokens_opencode.py" <session_id> --json --include-subagents --openrouter-api-key "$OPENROUTER_API_KEY"
+```
+
+This is important because the `opencode export` only covers the main session —
+sub-agent costs (often significant, e.g. 4x $0.50-1.00 for PR reviews) are stored
+as separate DB rows and would otherwise be missed.
+
 For OpenCode multi-model sessions, prefer the script's `model_breakdown` and
 `mode_breakdown` over user-estimated percentages. If `estimated_cost_usd` is `0`,
 report it as the value recorded by OpenCode and note that some providers/routes may
@@ -280,6 +329,7 @@ You can also run the OpenCode backend directly:
 
 ```bash
 python3 "$SKILL_ROOT/scripts/estimate_tokens_opencode.py" <session_id> --json
+python3 "$SKILL_ROOT/scripts/estimate_tokens_opencode.py" <session_id> --json --include-subagents
 python3 "$SKILL_ROOT/scripts/estimate_tokens_opencode.py" latest --json
 python3 "$SKILL_ROOT/scripts/estimate_tokens_opencode.py" --list
 ```
@@ -373,7 +423,9 @@ Report the file path written and show a brief preview of the synthesis header.
 | OpenCode input/output/reasoning/cache | `opencode export` assistant message telemetry |
 | OpenCode model split   | Group exported assistant turns by `providerID` + `modelID` |
 | OpenCode mode split    | Group exported assistant turns by `mode` / `agent`         |
-| OpenCode cost          | Sum exported assistant message `cost` values               |
+| OpenCode cost          | Sum exported assistant message `cost` values (or recomputed from OpenRouter API pricing when `--openrouter-api-key` is used) |
+| OpenCode sub-agent rollup | `session` DB rows with same `project_id`, overlapping time window, any agent type (no filter) — rolled up via `--include-subagents` |
+| OpenRouter API pricing | `GET /api/v1/models` returns per-token `prompt`, `completion`, `input_cache_read`, `input_cache_write` rates. Cost = Σ(tokens × rate). Cached at `/tmp/openrouter_pricing_cache.json` (1-hour TTL). |
 | Copilot base input     | `sum(len(user_message chars)) / 4`                         |
 | Copilot base output    | `sum(len(assistant_response chars)) / 4`                   |
 | Copilot context growth | Cumulative re-send of prior turns per input call           |
@@ -381,10 +433,21 @@ Report the file path written and show a brief preview of the synthesis header.
 | Copilot system prompt  | ~3,000 tokens fixed for Copilot CLI                        |
 | Manual estimated cost  | Computed only when the model matches `assets/model-pricing.md` |
 
-For OpenCode, treat the export values as recorded telemetry, not estimates. For
-Copilot CLI and fallback estimates, mark estimates with `~` prefix (e.g. `~26,000
+For OpenCode, treat the export values as recorded telemetry, not estimates.
+Without `--include-subagents`, the cost covers only the main session and
+under-reports total spend when sub-agents were used (e.g. parallel PR review
+lenses). With `--include-subagents`, the cost includes sub-agent sessions
+queried from the DB and is much closer to the OpenRouter billing total.
+
+With `--openrouter-api-key`, OpenRouter model costs are recomputed from
+per-token API pricing instead of relying on the export/DB cost, giving an
+independent and auditable cost estimate. Costs for non-OpenRouter providers
+(github-copilot, opencode free tier) still use the export/DB values.
+
+For Copilot CLI and fallback estimates, mark estimates with `~` prefix (e.g. `~26,000
 input tokens`). Always note whether the estimate is **opencode export telemetry**,
-**script-computed (copilot-cli)**, **script-computed (fallback)**, or **base only**.
+**opencode export + DB sub-agent rollup**, **script-computed (copilot-cli)**,
+**script-computed (fallback)**, or **base only**.
 
 ## Bundled Assets
 
@@ -393,7 +456,7 @@ input tokens`). Always note whether the estimate is **opencode export telemetry*
 | `assets/template.md` | Step 6 — use as the output MD template |
 | `assets/model-pricing.md` | Reference — script uses this table for cost calculation |
 | `scripts/estimate_tokens.py` | Step 5 — orchestrator dispatcher; run to compute token/cost estimate |
-| `scripts/estimate_tokens_opencode.py` | Called automatically by dispatcher for OpenCode export telemetry |
+| `scripts/estimate_tokens_opencode.py` | Called automatically by dispatcher for OpenCode export telemetry; pass `--include-subagents` to roll up costs from sub-agent sessions |
 | `scripts/estimate_tokens_copilot_cli.py` | Called automatically by dispatcher for Copilot CLI sessions |
 
 ## Extending to New Orchestrators
