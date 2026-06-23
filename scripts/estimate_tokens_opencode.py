@@ -102,31 +102,22 @@ def export_session(session_id: str, export_file: Optional[Path], keep_export: bo
 
 
 def find_related_sessions(conn: sqlite3.Connection, session_id: str) -> list[dict]:
-    """Query DB for other sessions related to the given session.
+    """Query DB for sub-agent sessions spawned by the given session.
 
-    Matches sessions with the same ``project_id``, created within the main
-    session's time window, excluding the main session itself.  No agent-type
-    filter is applied — any session sharing the project and time window is
-    considered related.
+    Matches sessions whose ``parent_id`` points to the given session (direct
+    children in the session hierarchy).  No agent-type filter is applied —
+    any session with the matching parent_id is included.
     """
-    row = conn.execute(
-        "SELECT project_id, time_created, time_updated FROM session WHERE id = ?",
-        (session_id,),
-    ).fetchone()
-    if not row or not row["project_id"]:
-        return []
-
     rows = conn.execute(
         """
         SELECT id, title, agent, model, cost,
                tokens_input, tokens_output, tokens_reasoning,
                tokens_cache_read, tokens_cache_write
         FROM session
-        WHERE project_id = ? AND id != ?
-          AND time_created >= ? AND time_created <= ? + 60000
+        WHERE parent_id = ?
         ORDER BY time_created
         """,
-        (row["project_id"], session_id, row["time_created"], row["time_updated"]),
+        (session_id,),
     )
     return [dict(r) for r in rows]
 
@@ -225,13 +216,13 @@ def compute_openrouter_cost(
 
 
 def add_subagent_data(report: dict, subagents: list[dict], pricing: Optional[dict] = None) -> None:
-    """Merge related-session (sub-agent) costs and tokens into the main report.
+    """Merge sub-agent costs and tokens into the main report.
 
     Adds a ``subagent_sessions`` list to the report and updates totals,
     model_breakdown, and pricing_status.
 
-    ``subagents`` should come from :func:`find_related_sessions` — any session
-    sharing the same project and time window is included (no agent-type filter).
+    ``subagents`` should come from :func:`find_related_sessions` — sessions
+    whose ``parent_id`` points to the main session (direct children).
 
     If ``pricing`` (from :func:`fetch_openrouter_pricing`) is provided,
     costs for OpenRouter sub-agents are recomputed from token counts × API pricing.
@@ -556,7 +547,7 @@ def main() -> None:
     parser.add_argument(
         "--include-subagents",
         action="store_true",
-        help="Query DB for related sessions (same project, overlapping time window) and roll up their costs and tokens",
+        help="Query DB for sub-agent sessions (sessions whose parent_id points to this session) and roll up their costs and tokens",
     )
     parser.add_argument(
         "--openrouter-api-key",

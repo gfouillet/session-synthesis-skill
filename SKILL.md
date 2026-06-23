@@ -170,7 +170,8 @@ before proceeding (see below).
 **Extract sub-agents invoked:**
 
 For OpenCode, use `--include-subagents` in Step 5 to automatically detect
-related sessions from the DB (same project, time overlap, any agent type).
+sub-agent sessions via the `parent_id` column in the session table
+(direct children in the session hierarchy, any agent type).
 Their costs and tokens are rolled up into the report and listed individually.
 See Step 5 for details.
 
@@ -304,12 +305,12 @@ python3 "$SKILL_ROOT/scripts/estimate_tokens.py" <session_id> --json --openroute
 ```
 
 **Sub-agent rollup (OpenCode only):** Pass `--include-subagents`
-to automatically detect related sessions and roll up their costs and tokens. The
-script queries the DB for any session with the same `project_id`, created within
-the main session's time window (excluding the main session itself), without
-restricting by agent type. Each related session is listed individually in the
-report's ``subagent_sessions`` array. OpenRouter pricing applies to OpenRouter
-sub-agents too when ``--openrouter-api-key`` is provided.
+to automatically detect sub-agent sessions and roll up their costs and tokens.
+The script queries the DB for sessions whose ``parent_id`` points to the main
+session (direct children in the session hierarchy), without restricting by
+agent type. Each related session is listed individually in the report's
+``subagent_sessions`` array. OpenRouter pricing applies to OpenRouter sub-agents
+too when ``--openrouter-api-key`` is provided.
 
 ```bash
 # Main session priced via OpenRouter API, sub-agents too:
@@ -424,7 +425,7 @@ Report the file path written and show a brief preview of the synthesis header.
 | OpenCode model split   | Group exported assistant turns by `providerID` + `modelID` |
 | OpenCode mode split    | Group exported assistant turns by `mode` / `agent`         |
 | OpenCode cost          | Sum exported assistant message `cost` values (or recomputed from OpenRouter API pricing when `--openrouter-api-key` is used) |
-| OpenCode sub-agent rollup | `session` DB rows with same `project_id`, overlapping time window, any agent type (no filter) — rolled up via `--include-subagents` |
+| OpenCode sub-agent rollup | `session` DB rows where `parent_id` = main session ID (direct children, any agent type) — rolled up via `--include-subagents` |
 | OpenRouter API pricing | `GET /api/v1/models` returns per-token `prompt`, `completion`, `input_cache_read`, `input_cache_write` rates. Cost = Σ(tokens × rate). Cached at `/tmp/openrouter_pricing_cache.json` (1-hour TTL). |
 | Copilot base input     | `sum(len(user_message chars)) / 4`                         |
 | Copilot base output    | `sum(len(assistant_response chars)) / 4`                   |
