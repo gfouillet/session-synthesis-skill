@@ -32,6 +32,7 @@ from typing import Optional
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 SESSION_STORE_DB = Path.home() / ".copilot" / "session-store.db"
 OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+WARP_DB = Path.home() / ".local" / "state" / "warp-terminal" / "warp.sqlite"
 CHARS_PER_TOKEN = 4
 
 
@@ -93,6 +94,28 @@ def _copilot_cli_is_active() -> bool:
         return False
 
 
+def _warp_detected() -> bool:
+    """Detect Warp if warp.sqlite exists with a recent session matching cwd."""
+    if not WARP_DB.exists():
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{WARP_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT ac.conversation_id "
+            "FROM agent_conversations ac "
+            "JOIN ai_queries aq ON aq.conversation_id = ac.conversation_id "
+            "WHERE aq.working_directory = ? "
+            "AND ac.last_modified_at > datetime('now', '-1 hour') "
+            "ORDER BY ac.last_modified_at DESC LIMIT 1",
+            (str(Path.cwd()),),
+        ).fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
 # ── Orchestrator registry ──────────────────────────────────────────────────────
 
 ORCHESTRATORS = [
@@ -109,6 +132,13 @@ ORCHESTRATORS = [
         "detect": _copilot_cli_is_active,
         "script": SKILL_ROOT / "scripts" / "estimate_tokens_copilot_cli.py",
         "db": SESSION_STORE_DB,
+    },
+    {
+        "name": "warp",
+        "description": "Warp terminal (agent mode)",
+        "detect": _warp_detected,
+        "script": SKILL_ROOT / "scripts" / "estimate_tokens_warp.py",
+        "db": WARP_DB,
     },
 ]
 
@@ -139,6 +169,7 @@ def no_session_store_report(orchestrator_name: str, model: Optional[str]) -> dic
     Used for orchestrators like OpenCode that have no local DB yet.
     """
     return {
+        "client": "Unknown",
         "session": {
             "id": "N/A",
             "summary": "N/A (no session store)",
@@ -210,6 +241,7 @@ def fallback_estimate(session_spec: str, db_path: Optional[Path], model: Optiona
     cost = compute_cost(input_tokens, output_tokens, model)
 
     return {
+        "client": "Unknown",
         "session": {
             "id": session["id"],
             "summary": session["summary"],
@@ -310,7 +342,7 @@ def compute_cost(input_tokens: int, output_tokens: int, model: Optional[str]) ->
 
 # ── Delegate to backend script ─────────────────────────────────────────────────
 
-def delegate_to_backend(script_path: Path, session_spec: Optional[str], model: Optional[str], as_json: bool, include_subagents: bool = False, list_only: bool = False, openrouter_api_key: Optional[str] = None) -> None:
+def delegate_to_backend(script_path: Path, session_spec: Optional[str], model: Optional[str], as_json: bool, include_subagents: bool = False, list_only: bool = False, openrouter_api_key: Optional[str] = None, model_map: Optional[str] = None, input_output_split: Optional[float] = None) -> None:
     """Load and run an orchestrator-specific backend as a subprocess."""
     import subprocess
     cmd = [sys.executable, str(script_path)]
@@ -326,6 +358,10 @@ def delegate_to_backend(script_path: Path, session_spec: Optional[str], model: O
         cmd.append("--include-subagents")
     if openrouter_api_key:
         cmd.extend(["--openrouter-api-key", openrouter_api_key])
+    if model_map:
+        cmd.extend(["--model-map", model_map])
+    if input_output_split is not None:
+        cmd.extend(["--input-output-split", str(input_output_split)])
     result = subprocess.run(cmd)
     sys.exit(result.returncode)
 
@@ -380,6 +416,10 @@ def main():
                         help="Include related sessions (same project, overlapping time) in cost rollup (OpenCode only)")
     parser.add_argument("--openrouter-api-key",
                         help="OpenRouter API key for per-model pricing from GET /api/v1/models")
+    parser.add_argument("--model-map",
+                        help="Path to a JSON file mapping display names to OpenRouter slugs")
+    parser.add_argument("--input-output-split", type=float, default=None,
+                        help="Assumed input/output token ratio (0.0-1.0) for single-total-token backends")
     args = parser.parse_args()
 
     orch = detect_orchestrator()
@@ -391,7 +431,7 @@ def main():
     if args.list:
         if orch and orch.get("script") and orch["script"].exists():
             print(f"[session-synthesis] Using backend: {orch['name']}", file=sys.stderr)
-            delegate_to_backend(orch["script"], None, None, args.json, list_only=True, include_subagents=args.include_subagents, openrouter_api_key=args.openrouter_api_key)
+            delegate_to_backend(orch["script"], None, None, args.json, list_only=True, include_subagents=args.include_subagents, openrouter_api_key=args.openrouter_api_key, model_map=args.model_map, input_output_split=args.input_output_split)
         if db_path and db_path.exists():
             list_sessions(db_path)
         elif SESSION_STORE_DB.exists():
@@ -416,7 +456,7 @@ def main():
 
     if orch and orch.get("script") and orch["script"].exists():
         print(f"[session-synthesis] Using backend: {orch['name']}", file=sys.stderr)
-        delegate_to_backend(orch["script"], args.session, args.model, args.json, include_subagents=args.include_subagents, openrouter_api_key=args.openrouter_api_key)
+        delegate_to_backend(orch["script"], args.session, args.model, args.json, include_subagents=args.include_subagents, openrouter_api_key=args.openrouter_api_key, model_map=args.model_map, input_output_split=args.input_output_split)
     elif orch and not orch.get("db"):
         # Orchestrator detected but has no session store (e.g. OpenCode)
         name = orch["name"]

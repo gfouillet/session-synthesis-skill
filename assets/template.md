@@ -1,5 +1,7 @@
 # Session: {{DATE}} — {{TITLE}}
 
+**Client**: {{CLIENT}}
+
 ## Goal
 {{GOAL}}
 

@@ -1,8 +1,8 @@
 ---
 name: session-synthesis
-description: 'Synthesize and save an OpenCode or Copilot coding session as a structured
-  Markdown file. Use when asked to "synthesize this session", "save session notes",
-  "log this session", "summarize what we did", "wrap up session", "track session
+description: 'Synthesize and save an OpenCode, Warp, or Copilot coding session as a
+  structured Markdown file. Use when asked to "synthesize this session", "save session
+  notes", "log this session", "summarize what we did", "wrap up session", "track session
   cost", "record session outcome", "log token usage", "retrospective on <topic>",
   "log last session", or "synthesize session from <date>". Operates in two modes:
   live (current session, full context available) or retrospective (past session
@@ -60,6 +60,14 @@ ORDER BY time_updated DESC
 LIMIT 10;
 ```
 
+For Warp:
+
+```bash
+python3 "$SKILL_ROOT/scripts/estimate_tokens_warp.py" --list
+```
+
+This lists recent agent conversations with timestamps, query counts, and working directories.
+
 For Copilot CLI:
 
 ```sql
@@ -94,6 +102,10 @@ For OpenCode, use `opencode export <session_id> > <json-file>` and read the expo
 `messages` array. User text appears in user message parts; assistant responses,
 reasoning, tool calls, token usage, mode, model, provider, and cost appear in
 assistant message `info` and `parts`.
+
+For Warp, the script reads `agent_conversations.conversation_usage_metadata.token_usage`
+which contains per-model token totals. No export command is needed — data comes from
+Warp's local SQLite database.
 
 For Copilot CLI:
 
@@ -137,7 +149,8 @@ before proceeding (see below).
 | 2 | `~/.local/share/opencode/sessions/` or `$XDG_DATA_HOME/opencode/sessions/` exists | **opencode** |
 | 2 | `opencode.json` or `opencode.jsonc` in cwd or `~/.config/opencode/` | **opencode** (confirmation) |
 | 3 | `~/.copilot/session-store.db` exists **with a recent session (<1h, matching cwd)** | **copilot-cli** |
-| 4 | `~/.claude/projects/` exists | claude-code (planned — not yet registered in dispatcher) |
+| 4 | `~/.local/state/warp-terminal/warp.sqlite` exists **with a recent session (<1h, matching cwd)** | **warp** |
+| 5 | `~/.claude/projects/` exists | claude-code (planned — not yet registered in dispatcher) |
 | — | Otherwise | unknown — use fallback estimator |
 
 > **Note for OpenCode:** Token and cost reporting uses `opencode export`
@@ -371,6 +384,45 @@ If the model is unknown or not listed in `assets/model-pricing.md`, skip manual 
 estimation and mark it as unavailable rather than guessing. This covers local or
 custom models.
 
+**For Warp sessions:**
+
+The dispatcher routes to `scripts/estimate_tokens_warp.py`, which reads
+`~/.local/state/warp-terminal/warp.sqlite` (read-only) and reports:
+
+- per-model token totals from `conversation_usage_metadata.token_usage`
+- tokens split by source: `custom_endpoint_tokens` (OpenRouter), `warp_tokens` (Oz), `byok_tokens`
+- category breakdown from `*_token_usage_by_category` maps
+- tool usage metadata (run_command, read_files, file_glob, apply_file_diff counts)
+
+Warp stores **single token totals per model** (no input/output split) and uses **display
+names** (e.g. "Claude Opus 4.8") rather than OpenRouter slugs. To compute approximate cost:
+
+```bash
+# With OpenRouter pricing + builtin slug mapping:
+python3 "$SKILL_ROOT/scripts/estimate_tokens_warp.py" latest --json --openrouter-api-key "$OPENROUTER_API_KEY"
+
+# With a custom display-name → slug mapping:
+python3 "$SKILL_ROOT/scripts/estimate_tokens_warp.py" latest --json --openrouter-api-key "$OPENROUTER_API_KEY" --model-map /path/to/map.json
+
+# Adjust the input/output split (default 0.8 = 80% input / 20% output):
+python3 "$SKILL_ROOT/scripts/estimate_tokens_warp.py" latest --json --input-output-split 0.7
+```
+
+The `--model-map` file is a JSON object mapping display names to OpenRouter slugs:
+```json
+{
+  "Claude Opus 4.8": "anthropic/claude-opus-4",
+  "DeepSeek V4 Flash": "deepseek/deepseek-chat"
+}
+```
+
+User-supplied mappings override the builtin table. Models with no slug mapping are listed
+as unpriced. Warp-managed (Oz) token counts are always reported but never priced.
+
+> **Approximation warning:** Warp OpenRouter cost is approximate because (a) display name
+> → slug mapping is best-effort and (b) the single token total is split into input/output
+> using an assumed ratio (default 80/20). The report always notes the split assumption.
+
 ### Step 5b: Check for Tokenscope Analysis (Optional Cross-Check)
 
 For OpenCode, `opencode export` is the primary source because it contains per-turn
@@ -433,6 +485,9 @@ Report the file path written and show a brief preview of the synthesis header.
 | Copilot file overhead  | `session_files` disk sizes / 4                             |
 | Copilot system prompt  | ~3,000 tokens fixed for Copilot CLI                        |
 | Manual estimated cost  | Computed only when the model matches `assets/model-pricing.md` |
+| Warp total tokens      | `conversation_usage_metadata.token_usage` — sum of warp_tokens + byok_tokens + custom_endpoint_tokens per model |
+| Warp cost              | OpenRouter API pricing via `--openrouter-api-key`, using display-name→slug mapping + assumed input/output split |
+| Warp category split    | `*_token_usage_by_category` maps (e.g. `primary_agent`, `tool_summarization`) |
 
 For OpenCode, treat the export values as recorded telemetry, not estimates.
 Without `--include-subagents`, the cost covers only the main session and
@@ -459,6 +514,8 @@ input tokens`). Always note whether the estimate is **opencode export telemetry*
 | `scripts/estimate_tokens.py` | Step 5 — orchestrator dispatcher; run to compute token/cost estimate |
 | `scripts/estimate_tokens_opencode.py` | Called automatically by dispatcher for OpenCode export telemetry; pass `--include-subagents` to roll up costs from sub-agent sessions |
 | `scripts/estimate_tokens_copilot_cli.py` | Called automatically by dispatcher for Copilot CLI sessions |
+| `scripts/estimate_tokens_warp.py` | Called automatically by dispatcher for Warp sessions; reads `warp.sqlite`, prices custom-endpoint models via OpenRouter |
+| `scripts/openrouter_pricing.py` | Shared OpenRouter API pricing helpers (key resolution, fetch, cache, cost computation) |
 
 ## Extending to New Orchestrators
 

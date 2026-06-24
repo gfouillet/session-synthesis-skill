@@ -16,6 +16,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+# ── Shared OpenRouter helpers ─────────────────────────────────────────────────
+_SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_SCRIPT_DIR))
+from openrouter_pricing import (  # noqa: E402
+    PRICING_CACHE_PATH,
+    PRICING_CACHE_TTL,
+    compute_openrouter_cost,
+    fetch_openrouter_pricing,
+    resolve_openrouter_api_key,
+)
+
 OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
 
@@ -122,97 +133,6 @@ def find_related_sessions(conn: sqlite3.Connection, session_id: str) -> list[dic
     return [dict(r) for r in rows]
 
 
-PRICING_CACHE_PATH = Path(tempfile.gettempdir()) / "openrouter_pricing_cache.json"
-PRICING_CACHE_TTL = 3600  # 1 hour
-
-
-def resolve_openrouter_api_key(provided: Optional[str]) -> Optional[str]:
-    """Resolve the OpenRouter API key from CLI arg, env var, or auth.json."""
-    if provided:
-        return provided
-    env_key = os.environ.get("OPENROUTER_API_KEY")
-    if env_key:
-        return env_key
-    auth_paths = [
-        Path.home() / ".local" / "share" / "opencode" / "auth.json",
-        Path.home() / ".config" / "opencode" / "auth.json",
-    ]
-    for p in auth_paths:
-        if p.exists():
-            try:
-                auth = json.loads(p.read_text())
-                key = auth.get("openrouter", {}).get("key")
-                if key:
-                    return key
-            except (json.JSONDecodeError, OSError, KeyError):
-                pass
-    return None
-
-
-def fetch_openrouter_pricing(api_key: str) -> dict[str, dict[str, float]]:
-    """Fetch per-token pricing from OpenRouter API with disk caching.
-
-    Returns ``{model_id: {prompt, completion, input_cache_read, input_cache_write}}``.
-    All prices are per-token (e.g. ``0.0000005`` = $0.50 / 1M tokens).
-    """
-    if PRICING_CACHE_PATH.exists():
-        age = time.time() - PRICING_CACHE_PATH.stat().st_mtime
-        if age < PRICING_CACHE_TTL:
-            try:
-                return json.loads(PRICING_CACHE_PATH.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
-
-    req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/models",
-        headers={"Authorization": f"Bearer {api_key}"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = json.loads(resp.read())
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, json.JSONDecodeError):
-        # If stale cache exists, use it as fallback
-        if PRICING_CACHE_PATH.exists():
-            try:
-                return json.loads(PRICING_CACHE_PATH.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
-        return {}
-
-    pricing = {}
-    for m in raw.get("data", []):
-        mid = m.get("id")
-        if not mid:
-            continue
-        p = m.get("pricing") or {}
-        pricing[mid] = {
-            "prompt": float(p.get("prompt", 0)),
-            "completion": float(p.get("completion", 0)),
-            "input_cache_read": float(p.get("input_cache_read", 0)),
-            "input_cache_write": float(p.get("input_cache_write", 0)),
-        }
-
-    try:
-        PRICING_CACHE_PATH.write_text(json.dumps(pricing))
-    except OSError:
-        pass
-
-    return pricing
-
-
-def compute_openrouter_cost(
-    tokens_input: int,
-    tokens_output: int,
-    tokens_cache_read: int,
-    tokens_cache_write: int,
-    model_pricing: dict[str, float],
-) -> float:
-    return (
-        tokens_input * model_pricing.get("prompt", 0)
-        + tokens_output * model_pricing.get("completion", 0)
-        + tokens_cache_read * model_pricing.get("input_cache_read", 0)
-        + tokens_cache_write * model_pricing.get("input_cache_write", 0)
-    )
 
 
 def add_subagent_data(report: dict, subagents: list[dict], pricing: Optional[dict] = None) -> None:
@@ -453,6 +373,7 @@ def build_report(data: dict, pricing: Optional[dict] = None) -> dict:
         pricing_status = "cost read from OpenCode export metadata; no manual pricing table used"
 
     return {
+        "client": "OpenCode",
         "session": {
             "id": info.get("id"),
             "summary": info.get("title") or info.get("slug"),

@@ -217,6 +217,7 @@ def build_report(session_id: str, conn: sqlite3.Connection, model: Optional[str]
     cost = compute_cost(total_input, total_output, model)
 
     return {
+        "client": "Copilot CLI",
         "session": {
             "id": session["id"],
             "summary": session["summary"],
