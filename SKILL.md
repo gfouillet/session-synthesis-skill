@@ -120,6 +120,9 @@ Using the gathered content, produce:
 - **Key decisions**: Important choices made during the session
 - **Outcome**: What was achieved
 
+Note the branch name from the session metadata — it will be used in Step 4 to
+infer whether the session is part of a larger feature.
+
 Present the draft summary to the user for confirmation or edits before proceeding.
 
 ### Step 3b: Detect Orchestrator & Extract Session Metadata
@@ -212,11 +215,25 @@ List skill names, e.g. `"juju-qa, jdb"`. Use `"none"` if none found.
 Ask the user (use ask_user tool when available):
 
 1. **Outcome**: ✅ Done / ⚠️ Partial / ❌ Failed
-2. **Self-rating**: 1–5 (quality of the session / was it efficient?)
+2. **Session context**: 🎯 One-shot (standalone task) or 🏗️ Part of a **larger feature**?
+   - If it looks like a larger feature (infer from the branch name extracted in Step 3),
+     ask: "Branch is `<branch>`. Is this session part of a larger feature? If so, do you have
+     a reference? (JIRA ticket, GitHub issue/PR)"
+   - Use `question` tool with a custom option for the user to provide the reference.
+   - If no branch info is available, still ask: "Is this a one-shot or part of a larger
+     feature? If larger, got a reference?"
+3. **Task size**: Which bucket best fits this session?
+   - 🪶 **XS** — minutes, trivial change (typo, one-line fix)
+   - 🌱 **S** — <1 hour, small fix
+   - 🌿 **M** — 1–3 hours, moderate feature
+   - 🌳 **L** — 3–8 hours, significant feature
+   - 🏔️ **XL** — 1–3 days, major feature
+   - 🌌 **XXL** — multi-day, complex initiative
+4. **Self-rating**: 1–5 (quality of the session / was it efficient?)
    - 5 → 🏆  |  4 → 🟢  |  3 → 🟡  |  2 → 🟠  |  1 → 🔴
-3. **Notes**: Any lessons learned, things to do differently, or follow-up actions
-4. **Output path**: Where to save (default: `~/copilot-sessions/`)
-5. **Model(s)**:
+5. **Notes**: Any lessons learned, things to do differently, or follow-up actions
+6. **Output path**: Where to save (default: `~/copilot-sessions/`)
+7. **Model(s)**:
    - For OpenCode sessions, do not ask the user to estimate model percentages before
      token reporting. `opencode export` records the model/provider, mode, tokens, cache,
      reasoning, and cost per assistant message. Use that telemetry as the source of truth.
