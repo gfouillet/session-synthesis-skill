@@ -17,6 +17,14 @@
 ## Self-Rating
 {{RATING_EMOJI}} {{RATING}}/5 — {{RATING_NOTE}}
 
+## Session Context
+{{SESSION_CONTEXT_EMOJI}} {{SESSION_CONTEXT}}
+<!-- 🎯 One-shot or 🏗️ Part of JUJU-5494 (JIRA) -->
+
+## Task Size
+{{TASK_SIZE_EMOJI}} {{TASK_SIZE_LABEL}}
+<!-- e.g. 🌳 L — 3–8 hours, significant feature -->
+
 ## Token Usage
 - **Model(s)**: {{MODELS}}
   <!-- Format: "<model> (<purpose>[, ~<pct>%])" e.g. "claude-opus-4.5 (implementation, ~90%), claude-sonnet-4.6 (synthesis)" -->
@@ -41,7 +49,7 @@
 ## Notes
 {{NOTES}}
 
-## Session Context
+## Environment
 - **Model(s)**: {{MODELS}}
 - **Sub-agents**: {{SUB_AGENTS}}
   <!-- e.g. "rubber-duck (x2), task/explore (x3)" or "none" -->
